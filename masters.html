@@ -1,0 +1,219 @@
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Masters · LoomLine Textile ERP</title>
+<meta name="theme-color" content="#141733">
+<script>try{document.documentElement.setAttribute("data-theme",localStorage.getItem("loomline.theme")||"light")}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Sora:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="erp-styles.css">
+</head><body>
+<script src="erp-data.js"></script><script src="erp-core.js"></script>
+<script>
+(function(){
+  const db = ERP.db;
+  const page = ERP.shell({ title:"Masters", crumb:"Manage", page:"masters.html", module:"masters" });
+  if(!page) return;
+  let tab = ERP.param("tab") || "customers";
+
+  const CFG = {
+    customers: {
+      title:"Customer", list:"customers", prefix:"C-", width:3, extra:{ outstanding:0 },
+      blurb:"Who you sell to. Credit limit and terms are checked when an order is raised.",
+      fields:[
+        { name:"name", label:"Company name", type:"text", required:true, full:true },
+        { name:"city", label:"City", type:"text", required:true },
+        { name:"gstin", label:"GSTIN", type:"text" },
+        { name:"contact", label:"Contact person", type:"text" },
+        { name:"phone", label:"Phone", type:"tel" },
+        { name:"terms", label:"Payment terms", type:"select", options:["On invoice","15 days","30 days","45 days","60 days"] },
+        { name:"credit", label:"Credit limit (₹)", type:"number" }
+      ],
+      cols:[
+        { h:"Customer", render:c => `<span class="people"><span class="avatar-lg">${ERP.initials(c.name)}</span>
+            <span><b>${ERP.esc(c.name)}</b><span>${ERP.esc(c.city)}</span></span></span>` },
+        { h:"Code", key:"id", cls:"mono" },
+        { h:"GSTIN", key:"gstin", cls:"mono" },
+        { h:"Contact", render:c => ERP.esc(c.contact || "—") + " · " + ERP.esc(c.phone || "") },
+        { h:"Terms", key:"terms" },
+        { h:"Credit limit", cls:"num", render:c => ERP.crore(c.credit) },
+        { h:"Outstanding", cls:"num", render:c => c.outstanding ? ERP.crore(c.outstanding) : "—" },
+        { h:"Limit used", render:c => ERP.bar(c.credit ? (c.outstanding/c.credit)*100 : 0,
+            c.outstanding/c.credit > .8 ? "bad" : c.outstanding/c.credit > .6 ? "warn" : "ok") }
+      ],
+      canDelete:c => db.salesOrders.some(o => o.customer === c.id) ? "Sales orders exist for this customer." : null
+    },
+    suppliers: {
+      title:"Supplier", list:"suppliers", prefix:"S-", width:3, extra:{ payable:0 },
+      blurb:"Who you buy from, and who does your job work.",
+      fields:[
+        { name:"name", label:"Company name", type:"text", required:true, full:true },
+        { name:"city", label:"City", type:"text", required:true },
+        { name:"gstin", label:"GSTIN", type:"text" },
+        { name:"supplies", label:"Supplies", type:"text", required:true },
+        { name:"contact", label:"Contact person", type:"text" },
+        { name:"phone", label:"Phone", type:"tel" },
+        { name:"terms", label:"Payment terms", type:"select", options:["On delivery","15 days","30 days","45 days"] }
+      ],
+      cols:[
+        { h:"Supplier", render:s => `<span class="people"><span class="avatar-lg">${ERP.initials(s.name)}</span>
+            <span><b>${ERP.esc(s.name)}</b><span>${ERP.esc(s.city)}</span></span></span>` },
+        { h:"Code", key:"id", cls:"mono" },
+        { h:"Supplies", key:"supplies" },
+        { h:"GSTIN", key:"gstin", cls:"mono" },
+        { h:"Contact", render:s => ERP.esc(s.contact || "—") + " · " + ERP.esc(s.phone || "") },
+        { h:"Terms", key:"terms" },
+        { h:"Payable", cls:"num", render:s => s.payable ? ERP.crore(s.payable) : "—" }
+      ],
+      canDelete:s => db.purchaseOrders.some(p => p.supplier === s.id) ? "Purchase orders exist for this supplier." : null
+    },
+    fabrics: {
+      title:"Fabric", list:"fabrics", prefix:"F-", width:3,
+      blurb:"Construction, GSM and width drive the BOM, the roll tag and the costing.",
+      fields:[
+        { name:"name", label:"Fabric name", type:"text", required:true, full:true },
+        { name:"warp", label:"Warp count", type:"text", required:true },
+        { name:"weft", label:"Weft count", type:"text", required:true },
+        { name:"gsm", label:"GSM", type:"number", required:true },
+        { name:"width", label:"Width (inches)", type:"number", required:true },
+        { name:"weave", label:"Weave", type:"select", options:["Plain","Twill","Satin","Oxford","Dobby","Jacquard"] },
+        { name:"comp", label:"Composition", type:"text", required:true },
+        { name:"finish", label:"Finish", type:"select", options:["Grey","Bleached","Dyed","Printed","Mercerised","Soft"] },
+        { name:"shrink", label:"Shrinkage", type:"text" },
+        { name:"rate", label:"Standard rate (₹/m)", type:"number", required:true }
+      ],
+      cols:[
+        { h:"Code", key:"id", cls:"mono" },
+        { h:"Fabric", key:"name", cls:"strong" },
+        { h:"Construction", render:f => f.warp + " × " + f.weft },
+        { h:"GSM", key:"gsm", cls:"num" },
+        { h:"Width", cls:"num", render:f => f.width + '"' },
+        { h:"Weave", render:f => ERP.badge(f.weave, "violet") },
+        { h:"Composition", key:"comp" },
+        { h:"Finish", key:"finish" },
+        { h:"Shrinkage", key:"shrink" },
+        { h:"Rate", cls:"num", render:f => ERP.money(f.rate) }
+      ],
+      canDelete:f => db.salesOrders.some(o => o.fabric === f.id) ? "Orders reference this fabric." : null
+    },
+    yarn: {
+      title:"Yarn lot", list:"yarn", prefix:"Y-", width:4, extra:{ kgUsed:0 },
+      blurb:"Lots as received. Consumption is posted by production, not typed here.",
+      fields:[
+        { name:"id_display", label:"Lot", type:"text", readonly:true, value:"assigned on save" },
+        { name:"count", label:"Count", type:"text", required:true },
+        { name:"type", label:"Type", type:"text", required:true },
+        { name:"blend", label:"Blend", type:"text" },
+        { name:"shade", label:"Shade", type:"text", value:"Grey" },
+        { name:"supplier", label:"Supplier", type:"select", options: db.suppliers.map(s => ({ value:s.id, label:s.name })) },
+        { name:"recd", label:"Received on", type:"date", value: ERP.today() },
+        { name:"rate", label:"Rate (₹/kg)", type:"number", required:true },
+        { name:"kgIn", label:"Quantity received (kg)", type:"number", required:true },
+        { name:"rack", label:"Rack", type:"text" },
+        { name:"test", label:"Incoming test", type:"select", options:["Awaiting test","Pass","Reject"] }
+      ],
+      cols:[
+        { h:"Lot", key:"id", cls:"mono strong" },
+        { h:"Count", key:"count" },
+        { h:"Type", key:"type" },
+        { h:"Supplier", render:y => ERP.esc(ERP.nameOf(db.suppliers, y.supplier)) },
+        { h:"Received", render:y => ERP.date(y.recd) },
+        { h:"In", cls:"num", render:y => ERP.num(y.kgIn) },
+        { h:"Used", cls:"num", render:y => ERP.num(y.kgUsed) },
+        { h:"Free", cls:"num", render:y => `<b>${ERP.num(y.kgIn - y.kgUsed)}</b>` },
+        { h:"Rate", cls:"num", render:y => ERP.money(y.rate) },
+        { h:"Test", render:y => ERP.statusBadge(String(y.test).startsWith("Pass") ? "Approved" : "On hold") }
+      ],
+      canDelete:y => y.kgUsed > 0 ? "This lot has already been consumed in production." : null
+    },
+    machines: {
+      title:"Machine", list:"machines", prefix:"M-", width:2,
+      extra:{ actual:0, downtime:0, operator:"—", shift:"A" },
+      blurb:"Looms, dyeing machines and printing machines. Codes starting L are treated as looms.",
+      fields:[
+        { name:"name", label:"Machine name", type:"text", required:true },
+        { name:"type", label:"Type", type:"select", options:["Airjet","Rapier","Projectile","Shuttle","Soft flow","Rotary","Stenter","Compactor"] },
+        { name:"make", label:"Make and model", type:"text" },
+        { name:"installed", label:"Installed on", type:"date" },
+        { name:"target", label:"Shift target", type:"number", value:1000 },
+        { name:"status", label:"Status", type:"select", options:["Running","Idle","Maintenance","Breakdown"] }
+      ],
+      cols:[
+        { h:"Code", key:"id", cls:"mono" },
+        { h:"Machine", key:"name", cls:"strong" },
+        { h:"Type", render:m => ERP.badge(m.type, "violet") },
+        { h:"Make", key:"make" },
+        { h:"Installed", render:m => ERP.date(m.installed) },
+        { h:"Target", cls:"num", render:m => ERP.num(m.target) },
+        { h:"Status", render:m => ERP.statusBadge(m.status) }
+      ],
+      canDelete:m => db.prodOrders.some(p => (p.machines||[]).indexOf(m.id) > -1) ? "Production orders are loaded on this machine." : null
+    },
+    stores: {
+      title:"Store item", list:"stores", prefix:"CH-", width:2,
+      blurb:"Dyes, chemicals and packing. Reorder levels feed the buying list.",
+      fields:[
+        { name:"name", label:"Item", type:"text", required:true, full:true },
+        { name:"group", label:"Group", type:"select", options:["Dye","Chemical","Packing","Spare","Other"] },
+        { name:"unit", label:"Unit", type:"select", options:["kg","nos","litre","m"] },
+        { name:"qty", label:"Quantity in hand", type:"number", required:true },
+        { name:"reorder", label:"Reorder level", type:"number", required:true },
+        { name:"rate", label:"Rate (₹)", type:"number", required:true }
+      ],
+      cols:[
+        { h:"Code", key:"id", cls:"mono" },
+        { h:"Item", key:"name", cls:"strong" },
+        { h:"Group", render:s => ERP.badge(s.group, "violet") },
+        { h:"In hand", cls:"num", render:s => ERP.num(s.qty) + " " + s.unit },
+        { h:"Reorder at", cls:"num", render:s => ERP.num(s.reorder) },
+        { h:"Rate", cls:"num", render:s => ERP.money(s.rate) },
+        { h:"Value", cls:"num", render:s => ERP.money(s.qty*s.rate) },
+        { h:"", render:s => s.qty <= s.reorder ? ERP.badge("Reorder","red") : ERP.badge("OK","green") }
+      ]
+    }
+  };
+
+  const handlers = {};
+  Object.keys(CFG).forEach(k => {
+    const c = CFG[k];
+    handlers[k] = ERP.crud({
+      list:c.list, prefix:c.prefix, width:c.width, title:c.title,
+      fields:c.fields.filter(f => f.name !== "id_display"),
+      extra:c.extra, cols:c.cols, canDelete:c.canDelete, after: render
+    });
+  });
+
+  function render(){
+    const c = CFG[tab], h = handlers[tab];
+    const q = "";
+    const rows = db[c.list];
+
+    page.innerHTML = `
+      <div class="page-head">
+        <div class="ph-txt"><h2>Master data</h2>
+          <p>Everything the rest of the ERP reads from. Add, edit or remove a record here and every
+             screen picks it up immediately.</p></div>
+        <button class="btn btn-primary" id="add">Add ${c.title.toLowerCase()}</button>
+      </div>
+      <div class="tabs">${Object.keys(CFG).map(k =>
+        `<button class="tab ${k===tab?"is-on":""}" data-tab="${k}">${CFG[k].title}s
+          <span class="mono" style="opacity:.6">${db[CFG[k].list].length}</span></button>`).join("")}</div>
+      <div class="filters"><input id="q" type="search" placeholder="Search ${c.title.toLowerCase()}s" value="${ERP.esc(q)}">
+        <span class="card-sub">${ERP.esc(c.blurb)}</span></div>
+      <div class="card" id="body">${h.html(rows)}</div>`;
+
+    const body = page.querySelector("#body");
+    h.wire(body);
+    page.querySelector("#add").onclick = () => h.editor();
+    page.querySelectorAll(".tab").forEach(b => b.onclick = () => { tab = b.dataset.tab; render(); });
+    const qi = page.querySelector("#q");
+    qi.oninput = () => {
+      const val = qi.value, pos = qi.selectionStart;
+      const rows2 = db[c.list].filter(r => !val || JSON.stringify(r).toLowerCase().includes(val.toLowerCase()));
+      body.innerHTML = h.html(rows2); h.wire(body);
+      qi.focus(); qi.setSelectionRange(pos, pos);
+    };
+  }
+  render();
+})();
+</script>
+</body></html>

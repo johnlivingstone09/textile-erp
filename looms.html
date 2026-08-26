@@ -1,0 +1,95 @@
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Loom board · LoomLine Textile ERP</title>
+<meta name="theme-color" content="#141733">
+<script>try{document.documentElement.setAttribute("data-theme",localStorage.getItem("loomline.theme")||"light")}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Sora:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="erp-styles.css">
+</head><body>
+<script src="erp-data.js"></script><script src="erp-core.js"></script>
+
+<script>
+(function(){
+  const db = ERP.db;
+  const page = ERP.shell({ title:"Loom board", crumb:"Make", page:"looms.html", module:"looms" });
+  if(!page) return;
+
+  function statusModal(m){
+    const fields = [
+      { name:"status", label:"Machine status", type:"select", options:["Running","Maintenance","Breakdown","Idle"], value:m.status },
+      { name:"actual", label:"Metres this shift", type:"number", value:m.actual, min:0 },
+      { name:"downtime", label:"Downtime (minutes)", type:"number", value:m.downtime, min:0 },
+      { name:"operator", label:"Operator", type:"text", value:m.operator },
+      { name:"remark", label:"Remark", type:"textarea", full:true, rows:2 }
+    ];
+    ERP.modal({
+      title: m.name + " · " + m.make, okText:"Update", body: ERP.form(fields),
+      onOk(scope){
+        const v = ERP.readForm(scope, fields);
+        if(!v) return false;
+        Object.assign(m, { status:v.status, actual:Number(v.actual), downtime:Number(v.downtime), operator:v.operator });
+        ERP.save(); ERP.toast(m.name + " set to " + v.status + "."); render();
+      }
+    });
+  }
+
+  function render(){
+    const looms = db.machines.filter(m => m.id.startsWith("L"));
+    const planned = looms.reduce((s,m) => s + m.target, 0);
+    const made = looms.reduce((s,m) => s + m.actual, 0);
+    const down = looms.reduce((s,m) => s + m.downtime, 0);
+
+    page.innerHTML = `
+      <div class="page-head"><div class="ph-txt"><h2>Shift A · ${ERP.date(ERP.today())}</h2>
+        <p>Tap a machine to change its status or post its output.</p></div></div>
+      ${ERP.kpis([
+        { label:"Planned", value: ERP.num(planned) + " m" },
+        { label:"Produced", value: ERP.num(made) + " m", tone:"sky" },
+        { label:"Efficiency", value: ERP.dec((made/planned)*100) + "%", tone: made/planned > .85 ? "teal" : "amber" },
+        { label:"Downtime", value: ERP.num(down) + " min", tone: down > 120 ? "bad" : "" },
+        { label:"Running", value: looms.filter(m => m.status === "Running").length + " / " + looms.length }
+      ])}
+      <div class="grid g-3" id="cards"></div>
+      <div class="card" style="margin-top:16px">
+        <div class="card-head"><h3>All machines</h3></div>
+        <div id="tbl"></div>
+      </div>`;
+
+    page.querySelector("#cards").innerHTML = looms.map(m => {
+      const eff = m.target ? (m.actual/m.target)*100 : 0;
+      const tone = m.status === "Breakdown" ? "bad" : eff >= 90 ? "ok" : eff >= 80 ? "" : "warn";
+      const job = db.prodOrders.find(p => p.machines.includes(m.id) && p.status !== "Completed");
+      return `<div class="card" style="cursor:pointer" data-m="${m.id}">
+        <div class="card-head"><h3>${ERP.esc(m.name)}</h3><span class="right">${ERP.statusBadge(m.status)}</span></div>
+        <div class="card-body">
+          <div class="def" style="grid-template-columns:repeat(3,1fr);margin-bottom:12px">
+            <div><dt>Target</dt><dd>${ERP.num(m.target)}</dd></div>
+            <div><dt>Actual</dt><dd>${ERP.num(m.actual)}</dd></div>
+            <div><dt>Downtime</dt><dd>${m.downtime}m</dd></div>
+          </div>
+          ${ERP.bar(eff, tone)}
+          <p style="margin:12px 0 0;font-size:.83rem;color:var(--muted)">
+            ${job ? "On " + ERP.esc(job.id) + " · " + ERP.esc(ERP.nameOf(db.fabrics, job.fabric)) : "No order loaded"}<br>
+            Operator ${ERP.esc(m.operator)} · ${ERP.esc(m.make)}</p>
+        </div></div>`;
+    }).join("");
+    page.querySelectorAll("[data-m]").forEach(c =>
+      c.onclick = () => statusModal(ERP.by(db.machines, c.dataset.m)));
+
+    page.querySelector("#tbl").innerHTML = ERP.table([
+      { h:"Code", key:"id", cls:"mono" },
+      { h:"Machine", key:"name", cls:"strong" },
+      { h:"Type", key:"type" },
+      { h:"Make", key:"make" },
+      { h:"Installed", render:m => ERP.date(m.installed) },
+      { h:"Target", cls:"num", render:m => ERP.num(m.target) },
+      { h:"Actual", cls:"num", render:m => ERP.num(m.actual) },
+      { h:"Efficiency", cls:"num", render:m => m.target ? ERP.dec((m.actual/m.target)*100,0) + "%" : "—" },
+      { h:"Status", render:m => ERP.statusBadge(m.status) }
+    ], db.machines);
+  }
+  render();
+})();
+</script>
+</body></html>

@@ -1,0 +1,148 @@
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dispatch · LoomLine Textile ERP</title>
+<meta name="theme-color" content="#141733">
+<script>try{document.documentElement.setAttribute("data-theme",localStorage.getItem("loomline.theme")||"light")}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Sora:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="erp-styles.css">
+</head><body>
+<script src="erp-data.js"></script><script src="erp-core.js"></script>
+
+<script>
+(function(){
+  const db = ERP.db;
+  const page = ERP.shell({ title:"Dispatch & invoices", crumb:"Sell", page:"dispatch.html", module:"dispatch" });
+  if(!page) return;
+  let tab = "dispatch";
+
+  const gstAmt = i => i.metres * i.rate * (i.gst/100);
+  const total  = i => i.metres * i.rate + gstAmt(i);
+
+  function packModal(){
+    const live = db.salesOrders.filter(o => o.passed > o.dispatched);
+    if(!live.length){ ERP.toast("No quality-passed fabric is waiting to go out."); return; }
+    const fields = [
+      { name:"so", label:"Sales order", type:"select", required:true,
+        options: live.map(o => ({ value:o.id, label:o.id + " — " + ERP.nameOf(db.customers,o.customer) + " · " + ERP.num(o.passed-o.dispatched) + " m ready" })) },
+      { name:"metres", label:"Metres to dispatch", type:"number", required:true, min:1 },
+      { name:"vehicle", label:"Vehicle number", type:"text", required:true },
+      { name:"transporter", label:"Transporter", type:"text", required:true },
+      { name:"eway", label:"E-way bill number", type:"text" }
+    ];
+    const m = ERP.modal({
+      title:"Pack and dispatch", wide:true, okText:"Create challan", body: ERP.form(fields),
+      onOk(scope){
+        const v = ERP.readForm(scope, fields); if(!v) return false;
+        const so = ERP.by(db.salesOrders, v.so);
+        const metres = Math.min(Number(v.metres), so.passed - so.dispatched);
+        const id = ERP.nextId(db.dispatches, "DC-", 4);
+        db.dispatches.unshift({ id, date: ERP.today(), so:so.id, customer:so.customer, rolls:[],
+          metres, vehicle:v.vehicle, transporter:v.transporter, eway:v.eway || "—", status:"Loading" });
+        so.dispatched += metres; so.packed = Math.max(so.packed, so.dispatched);
+        if(so.dispatched >= so.qty) so.status = "Completed";
+        const inv = { id:"IN-2026-" + String(300 + db.invoices.length + 12), date: ERP.today(), so:so.id,
+          customer:so.customer, metres, rate:so.rate, gst:5, paid:0, status:"Unpaid" };
+        db.invoices.unshift(inv);
+        const c = ERP.by(db.customers, so.customer);
+        c.outstanding += total(inv);
+        ERP.save(); ERP.toast("Challan " + id + " and invoice " + inv.id + " created."); render();
+      }
+    });
+    m.el.querySelector('[name="so"]').addEventListener("change", e => {
+      const so = ERP.by(db.salesOrders, e.target.value);
+      m.el.querySelector('[name="metres"]').value = so.passed - so.dispatched;
+    });
+    m.el.querySelector('[name="so"]').dispatchEvent(new Event("change"));
+  }
+
+  function payModal(inv){
+    const f = [{ name:"amt", label:"Amount received (₹)", type:"number", value: Math.round(total(inv) - inv.paid), required:true },
+               { name:"mode", label:"Mode", type:"select", options:["NEFT","RTGS","UPI","Cheque","Cash"] }];
+    ERP.modal({
+      title:"Record payment · " + inv.id, okText:"Record", body: ERP.form(f),
+      onOk(scope){
+        const v = ERP.readForm(scope, f); if(!v) return false;
+        inv.paid += Number(v.amt);
+        inv.status = inv.paid >= total(inv) - 1 ? "Paid" : "Part paid";
+        const c = ERP.by(db.customers, inv.customer);
+        c.outstanding = Math.max(0, c.outstanding - Number(v.amt));
+        ERP.save(); ERP.toast(ERP.money(v.amt) + " recorded against " + inv.id + "."); render();
+      }
+    });
+  }
+
+  function render(){
+    const due = db.invoices.reduce((s,i) => s + (total(i) - i.paid), 0);
+
+    page.innerHTML = `
+      <div class="page-head"><div class="ph-txt"><h2>Dispatch and money</h2>
+        <p>Fabric that passed inspection goes out here, and the invoice is raised with it.</p></div>
+        <button class="btn btn-primary" id="pack">Pack and dispatch</button></div>
+      ${ERP.kpis([
+        { label:"Dispatched", value: ERP.num(db.dispatches.reduce((s,d)=>s+d.metres,0)) + " m", note: db.dispatches.length + " challans" },
+        { label:"In transit", value: db.dispatches.filter(d=>d.status!=="Delivered").length + " loads", tone:"sky" },
+        { label:"Invoiced", value: ERP.crore(db.invoices.reduce((s,i)=>s+total(i),0)) },
+        { label:"Outstanding", value: ERP.crore(due), tone:"rose" }
+      ])}
+      <div class="tabs">
+        <button class="tab ${tab==="dispatch"?"is-on":""}" data-tab="dispatch">Challans</button>
+        <button class="tab ${tab==="invoices"?"is-on":""}" data-tab="invoices">Invoices</button>
+        <button class="tab ${tab==="ageing"?"is-on":""}" data-tab="ageing">Customer ageing</button>
+      </div>
+      <div class="card" id="body"></div>`;
+
+    const body = page.querySelector("#body");
+    if(tab === "dispatch"){
+      body.innerHTML = ERP.table([
+        { h:"Challan", key:"id", cls:"mono strong" },
+        { h:"Date", render:d => ERP.date(d.date) },
+        { h:"Order", key:"so", cls:"mono" },
+        { h:"Customer", render:d => ERP.esc(ERP.nameOf(db.customers,d.customer)) },
+        { h:"Metres", cls:"num", render:d => ERP.num(d.metres) },
+        { h:"Vehicle", key:"vehicle", cls:"mono" },
+        { h:"Transporter", key:"transporter" },
+        { h:"E-way bill", key:"eway", cls:"mono" },
+        { h:"Status", render:d => ERP.statusBadge(d.status) }
+      ], db.dispatches);
+    }
+    if(tab === "invoices"){
+      body.innerHTML = ERP.table([
+        { h:"Invoice", key:"id", cls:"mono strong" },
+        { h:"Date", render:i => ERP.date(i.date) },
+        { h:"Customer", render:i => ERP.esc(ERP.nameOf(db.customers,i.customer)) },
+        { h:"Order", key:"so", cls:"mono" },
+        { h:"Metres", cls:"num", render:i => ERP.num(i.metres) },
+        { h:"Taxable", cls:"num", render:i => ERP.money(i.metres*i.rate) },
+        { h:"GST", cls:"num", render:i => i.gst + "% · " + ERP.money(gstAmt(i)) },
+        { h:"Total", cls:"num", render:i => `<b>${ERP.money(total(i))}</b>` },
+        { h:"Received", cls:"num", render:i => ERP.money(i.paid) },
+        { h:"Status", render:i => ERP.statusBadge(i.status) },
+        { h:"", render:i => i.status !== "Paid" ? `<button class="btn btn-sm" data-p="${i.id}">Payment</button>` : "" }
+      ], db.invoices);
+      body.querySelectorAll("[data-p]").forEach(b =>
+        b.onclick = () => payModal(db.invoices.find(x => x.id === b.dataset.p)));
+    }
+    if(tab === "ageing"){
+      const rows = db.customers.map(c => {
+        const inv = db.invoices.filter(i => i.customer === c.id && i.status !== "Paid");
+        const owed = inv.reduce((s,i) => s + (total(i) - i.paid), 0);
+        return { c, inv:inv.length, owed, used: c.credit ? (c.outstanding/c.credit)*100 : 0 };
+      });
+      body.innerHTML = ERP.table([
+        { h:"Customer", render:r => ERP.esc(r.c.name) + ", " + ERP.esc(r.c.city), cls:"strong" },
+        { h:"Terms", render:r => r.c.terms },
+        { h:"Open invoices", cls:"num", render:r => r.inv },
+        { h:"Outstanding", cls:"num", render:r => ERP.crore(r.c.outstanding) },
+        { h:"Credit limit", cls:"num", render:r => ERP.crore(r.c.credit) },
+        { h:"Limit used", render:r => ERP.bar(r.used, r.used > 80 ? "bad" : r.used > 60 ? "warn" : "ok") }
+      ], rows);
+    }
+
+    page.querySelector("#pack").onclick = packModal;
+    page.querySelectorAll(".tab").forEach(b => b.onclick = () => { tab = b.dataset.tab; render(); });
+  }
+  render();
+})();
+</script>
+</body></html>

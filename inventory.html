@@ -1,0 +1,142 @@
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inventory · LoomLine Textile ERP</title>
+<meta name="theme-color" content="#141733">
+<script>try{document.documentElement.setAttribute("data-theme",localStorage.getItem("loomline.theme")||"light")}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Sora:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="erp-styles.css">
+</head><body>
+<script src="erp-data.js"></script><script src="erp-core.js"></script>
+
+<script>
+(function(){
+  const db = ERP.db;
+  const page = ERP.shell({ title:"Inventory & rolls", crumb:"Stock", page:"inventory.html", module:"inventory" });
+  if(!page) return;
+  let tab = ERP.param("tab") || "rolls", q = ERP.param("q") || "";
+
+  function rollModal(r){
+    const f = ERP.by(db.fabrics, r.fabric);
+    ERP.modal({
+      title:"Roll " + r.id, wide:true, cancelText:"Close",
+      body: `<div class="split" style="align-items:flex-start">
+        <div style="flex:0 0 auto;text-align:center">${ERP.qrTag(r.id)}
+          <p class="mono" style="margin-top:6px;font-size:.72rem">${r.id}</p></div>
+        <div style="flex:1;min-width:240px">
+          <dl class="def">
+            <div><dt>Fabric</dt><dd>${ERP.esc(f.name)}</dd></div>
+            <div><dt>Length</dt><dd>${r.metres} m</dd></div>
+            <div><dt>GSM</dt><dd>${r.gsm}</dd></div>
+            <div><dt>Width</dt><dd>${r.width}"</dd></div>
+            <div><dt>Grade</dt><dd>${r.grade} · ${r.points} pts</dd></div>
+            <div><dt>Machine</dt><dd>${ERP.esc(ERP.nameOf(db.machines, r.machine))}</dd></div>
+            <div><dt>Yarn lot</dt><dd>${r.yarnLot}</dd></div>
+            <div><dt>Order</dt><dd>${r.so || "—"}</dd></div>
+            <div><dt>Location</dt><dd>${ERP.esc(r.rack)}</dd></div>
+            <div><dt>Status</dt><dd>${ERP.statusBadge(r.status)}</dd></div>
+          </dl>
+          <p style="margin-top:14px"><a class="btn btn-sm" href="traceability.html?roll=${r.id}">Trace this roll</a>
+          <button class="btn btn-sm" onclick="window.print()">Print tag</button></p>
+        </div></div>`
+    });
+  }
+
+  function moveModal(){
+    const fields = [
+      { name:"roll", label:"Roll", type:"select", required:true,
+        options: db.rolls.map(r => ({ value:r.id, label:r.id + " — " + r.rack })) },
+      { name:"rack", label:"Move to", type:"text", required:true, hint:"Rack, godown or vendor" },
+      { name:"status", label:"Status", type:"select", options:["In stock","On hold","At job work","Dispatched","Rejected"] }
+    ];
+    ERP.modal({
+      title:"Move stock", okText:"Move", body: ERP.form(fields),
+      onOk(scope){
+        const v = ERP.readForm(scope, fields); if(!v) return false;
+        const r = ERP.by(db.rolls, v.roll);
+        r.rack = v.rack; r.status = v.status;
+        ERP.save(); ERP.toast(r.id + " moved to " + v.rack + "."); render();
+      }
+    });
+  }
+
+  function render(){
+    const s = q.toUpperCase();
+    const rolls = db.rolls.filter(r => !s || r.id.toUpperCase().includes(s) || r.yarnLot.toUpperCase().includes(s));
+    const yarn  = db.yarn.filter(y => !s || y.id.toUpperCase().includes(s) || y.count.toUpperCase().includes(s));
+    const d = ERP.derive();
+
+    page.innerHTML = `
+      <div class="page-head"><div class="ph-txt"><h2>Stock</h2>
+        <p>Yarn by lot, fabric by roll, stores by item — every line valued.</p></div>
+        <button class="btn" id="move">Move stock</button></div>
+      ${ERP.kpis([
+        { label:"Yarn in hand", value: ERP.num(db.yarn.reduce((t,y)=>t+(y.kgIn-y.kgUsed),0)) + " kg", note: ERP.crore(d.yarnValue) },
+        { label:"Fabric in hand", value: ERP.num(d.rollStock.reduce((t,r)=>t+r.metres,0)) + " m", note: d.rollStock.length + " rolls · " + ERP.crore(d.fabricValue) },
+        { label:"Stores", value: ERP.crore(d.storeValue), note: db.stores.filter(x=>x.qty<=x.reorder).length + " items below reorder", tone: db.stores.some(x=>x.qty<=x.reorder) ? "warn" : "" },
+        { label:"Blocked", value: db.rolls.filter(r=>r.status==="On hold"||r.status==="Rejected").length + " rolls", tone:"rose" }
+      ])}
+      <div class="tabs">
+        <button class="tab ${tab==="rolls"?"is-on":""}" data-tab="rolls">Fabric rolls</button>
+        <button class="tab ${tab==="yarn"?"is-on":""}" data-tab="yarn">Yarn lots</button>
+        <button class="tab ${tab==="stores"?"is-on":""}" data-tab="stores">Dyes, chemicals & packing</button>
+      </div>
+      <div class="filters"><input id="q" type="search" placeholder="Search roll, lot or count" value="${ERP.esc(q)}"></div>
+      <div class="card" id="body"></div>`;
+
+    const body = page.querySelector("#body");
+    if(tab === "rolls"){
+      body.innerHTML = ERP.table([
+        { h:"Roll", key:"id", cls:"mono strong" },
+        { h:"Fabric", render:r => ERP.esc(ERP.nameOf(db.fabrics,r.fabric)) },
+        { h:"Metres", cls:"num", render:r => r.metres },
+        { h:"GSM", cls:"num", key:"gsm" },
+        { h:"Width", cls:"num", render:r => r.width + '"' },
+        { h:"Grade", render:r => ERP.badge(r.grade, r.grade==="A"?"green":r.grade==="B"?"amber":"red") },
+        { h:"Machine", render:r => `<span class="mono">${r.machine}</span>` },
+        { h:"Yarn lot", render:r => `<span class="mono">${r.yarnLot}</span>` },
+        { h:"Location", key:"rack" },
+        { h:"Status", render:r => ERP.statusBadge(r.status) }
+      ], rolls, { onRow:true, rowAttr:r => `data-id="${r.id}"` });
+      body.querySelectorAll("tbody tr").forEach(tr => tr.onclick = () => rollModal(ERP.by(db.rolls, tr.dataset.id)));
+    }
+    if(tab === "yarn"){
+      body.innerHTML = ERP.table([
+        { h:"Lot", key:"id", cls:"mono strong" },
+        { h:"Count", key:"count" },
+        { h:"Type", key:"type" },
+        { h:"Blend", key:"blend" },
+        { h:"Supplier", render:y => ERP.esc(ERP.nameOf(db.suppliers,y.supplier)) },
+        { h:"Received", render:y => ERP.date(y.recd) },
+        { h:"In", cls:"num", render:y => ERP.num(y.kgIn) },
+        { h:"Used", cls:"num", render:y => ERP.num(y.kgUsed) },
+        { h:"Free", cls:"num", render:y => `<b>${ERP.num(y.kgIn-y.kgUsed)}</b>` },
+        { h:"Rate", cls:"num", render:y => ERP.money(y.rate) },
+        { h:"Value", cls:"num", render:y => ERP.crore((y.kgIn-y.kgUsed)*y.rate) },
+        { h:"Rack", key:"rack" },
+        { h:"Test", render:y => y.test.startsWith("Pass") ? ERP.badge(y.test,"green") : ERP.badge(y.test,"amber") }
+      ], yarn);
+    }
+    if(tab === "stores"){
+      body.innerHTML = ERP.table([
+        { h:"Code", key:"id", cls:"mono" },
+        { h:"Item", key:"name", cls:"strong" },
+        { h:"Group", key:"group" },
+        { h:"Quantity", cls:"num", render:i => ERP.num(i.qty) + " " + i.unit },
+        { h:"Reorder at", cls:"num", render:i => ERP.num(i.reorder) },
+        { h:"Rate", cls:"num", render:i => ERP.money(i.rate) },
+        { h:"Value", cls:"num", render:i => ERP.crore(i.qty*i.rate) },
+        { h:"", render:i => i.qty <= i.reorder ? ERP.badge("Reorder","red") : ERP.badge("OK","green") }
+      ], db.stores);
+    }
+
+    page.querySelector("#move").onclick = moveModal;
+    page.querySelectorAll(".tab").forEach(b => b.onclick = () => { tab = b.dataset.tab; render(); });
+    const qi = page.querySelector("#q");
+    qi.oninput = () => { q = qi.value; const p = qi.selectionStart; render();
+      const n = page.querySelector("#q"); n.focus(); n.setSelectionRange(p,p); };
+  }
+  render();
+})();
+</script>
+</body></html>

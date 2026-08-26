@@ -1,0 +1,108 @@
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Job work · LoomLine Textile ERP</title>
+<meta name="theme-color" content="#141733">
+<script>try{document.documentElement.setAttribute("data-theme",localStorage.getItem("loomline.theme")||"light")}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Sora:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="erp-styles.css">
+</head><body>
+<script src="erp-data.js"></script><script src="erp-core.js"></script>
+
+<script>
+(function(){
+  const db = ERP.db;
+  const page = ERP.shell({ title:"Job work", crumb:"Make", page:"jobwork.html", module:"jobwork" });
+  if(!page) return;
+
+  const fields = [
+    { name:"type", label:"Process", type:"select", options:["Dyeing","Printing","Embroidery","Washing","Finishing","Stitching","Sizing"] },
+    { name:"vendor", label:"Vendor", type:"select", required:true,
+      options: db.suppliers.map(s => ({ value:s.id, label:s.name + " — " + s.city })) },
+    { name:"process", label:"Work description", type:"text", required:true, full:true },
+    { name:"sentKg", label:"Weight sent (kg)", type:"number", required:true, min:1 },
+    { name:"rate", label:"Rate per kg (₹)", type:"number", required:true },
+    { name:"due", label:"Expected back", type:"date", required:true }
+  ];
+
+  function sendOut(){
+    ERP.modal({
+      title:"Send material out", wide:true, okText:"Send", body: ERP.form(fields),
+      onOk(scope){
+        const v = ERP.readForm(scope, fields); if(!v) return false;
+        const id = ERP.nextId(db.jobWorks, "JW-", 4);
+        db.jobWorks.unshift({ id, type:v.type, vendor:v.vendor, date: ERP.today(), process:v.process,
+          sentKg:Number(v.sentKg), recdKg:0, rate:Number(v.rate), due:v.due, status:"Sent" });
+        ERP.save(); ERP.toast(id + " — " + ERP.num(v.sentKg) + " kg sent to " + ERP.nameOf(db.suppliers, v.vendor) + "."); render();
+      }
+    });
+  }
+
+  function receive(j){
+    const rf = [
+      { name:"recdKg", label:"Weight received (kg)", type:"number", value:j.sentKg, required:true },
+      { name:"rejectKg", label:"Rejected (kg)", type:"number", value:0 },
+      { name:"remark", label:"Remark", type:"textarea", full:true, rows:2 }
+    ];
+    ERP.modal({
+      title:"Receive " + j.id, okText:"Receive", body: ERP.form(rf),
+      onOk(scope){
+        const v = ERP.readForm(scope, rf); if(!v) return false;
+        j.recdKg = Number(v.recdKg); j.reject = Number(v.rejectKg); j.status = "Received";
+        const sup = ERP.by(db.suppliers, j.vendor);
+        sup.payable += j.recdKg * j.rate;
+        ERP.save();
+        const loss = ((j.sentKg - j.recdKg) / j.sentKg) * 100;
+        ERP.toast(j.id + " received. Loss " + ERP.dec(loss) + "%" + (loss > 4 ? " — above the agreed 4%." : "."));
+        render();
+      }
+    });
+  }
+
+  function render(){
+    const out = db.jobWorks.filter(j => j.status === "Sent");
+    const outKg = out.reduce((s,j) => s + j.sentKg, 0);
+    const done = db.jobWorks.filter(j => j.status === "Received");
+    const avgLoss = done.length ? done.reduce((s,j) => s + ((j.sentKg-j.recdKg)/j.sentKg)*100, 0)/done.length : 0;
+    const bill = db.jobWorks.reduce((s,j) => s + j.recdKg*j.rate, 0);
+
+    page.innerHTML = `
+      <div class="page-head"><div class="ph-txt"><h2>Job work</h2>
+        <p>What is lying with the dyer, the printer and the sizing unit — and what came back.</p></div>
+        <button class="btn btn-primary" id="send">Send material out</button></div>
+      ${ERP.kpis([
+        { label:"Lying outside", value: ERP.num(outKg) + " kg", note: out.length + " open challans", tone:"amber" },
+        { label:"Received back", value: ERP.num(done.reduce((s,j)=>s+j.recdKg,0)) + " kg" },
+        { label:"Average loss", value: ERP.dec(avgLoss) + "%", tone: avgLoss > 4 ? "rose" : "teal", note:"Agreed limit 4%" },
+        { label:"Job work bill", value: ERP.crore(bill) }
+      ])}
+      <div class="card">
+        <div class="card-head"><h3>Challans</h3></div>
+        <div id="tbl"></div>
+      </div>`;
+
+    page.querySelector("#tbl").innerHTML = ERP.table([
+      { h:"Challan", key:"id", cls:"mono strong" },
+      { h:"Date", render:j => ERP.date(j.date) },
+      { h:"Process", key:"type" },
+      { h:"Work", key:"process" },
+      { h:"Vendor", render:j => ERP.esc(ERP.nameOf(db.suppliers,j.vendor)) },
+      { h:"Sent", cls:"num", render:j => ERP.num(j.sentKg) },
+      { h:"Received", cls:"num", render:j => j.recdKg ? ERP.num(j.recdKg) : "—" },
+      { h:"Loss", cls:"num", render:j => {
+        if(!j.recdKg) return "—";
+        const l = ((j.sentKg-j.recdKg)/j.sentKg)*100;
+        return `<span class="${l>4?"badge red":""}">${ERP.dec(l)}%</span>`; } },
+      { h:"Rate", cls:"num", render:j => ERP.money(j.rate) },
+      { h:"Bill", cls:"num", render:j => j.recdKg ? ERP.money(j.recdKg*j.rate) : "—" },
+      { h:"Due back", render:j => ERP.date(j.due) },
+      { h:"Status", render:j => ERP.statusBadge(j.status) },
+      { h:"", render:j => j.status === "Sent" ? `<button class="btn btn-sm" data-j="${j.id}">Receive</button>` : "" }
+    ], db.jobWorks);
+    page.querySelectorAll("[data-j]").forEach(b => b.onclick = () => receive(ERP.by(db.jobWorks, b.dataset.j)));
+    page.querySelector("#send").onclick = sendOut;
+  }
+  render();
+})();
+</script>
+</body></html>

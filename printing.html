@@ -1,0 +1,138 @@
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Printing · LoomLine Textile ERP</title>
+<meta name="theme-color" content="#141733">
+<script>try{document.documentElement.setAttribute("data-theme",localStorage.getItem("loomline.theme")||"light")}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Sora:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="erp-styles.css">
+</head><body>
+<script src="erp-data.js"></script><script src="erp-core.js"></script>
+<script>
+(function(){
+  const db = ERP.db;
+  const page = ERP.shell({ title:"Printing", crumb:"Make", page:"printing.html", module:"printing" });
+  if(!page) return;
+  let tab = "jobs";
+
+  const designFields = [
+    { name:"name",     label:"Design name", type:"text", required:true },
+    { name:"customer", label:"Customer", type:"select", options: db.customers.map(c => ({ value:c.id, label:c.name })) },
+    { name:"colours",  label:"Colours", type:"number", required:true, min:1 },
+    { name:"screens",  label:"Screens", type:"number", required:true, min:1 },
+    { name:"repeat",   label:"Repeat size", type:"text", hint:"e.g. 64 cm" },
+    { name:"artwork",  label:"Artwork file", type:"text" },
+    { name:"status",   label:"Approval", type:"select", options:["Awaiting approval","Sample sent","Approved","Rejected"] }
+  ];
+  const designs = ERP.crud({
+    list:"designs", prefix:"DS-", width:3, title:"Design", fields:designFields,
+    cols:[
+      { h:"Code", key:"id", cls:"mono" },
+      { h:"Design", key:"name", cls:"strong" },
+      { h:"Customer", render:d => ERP.esc(ERP.nameOf(db.customers, d.customer)) },
+      { h:"Colours", cls:"num", key:"colours" },
+      { h:"Screens", cls:"num", key:"screens" },
+      { h:"Repeat", key:"repeat" },
+      { h:"Artwork", render:d => `<span class="mono">${ERP.esc(d.artwork || "—")}</span>` },
+      { h:"Approval", render:d => ERP.statusBadge(d.status) }
+    ],
+    canDelete(d){ return db.printJobs.some(j => j.design === d.id) ? "Print jobs already run on this design." : null; },
+    after: render
+  });
+
+  function newJob(){
+    const f = [
+      { name:"date",   label:"Date", type:"date", value: ERP.today(), required:true },
+      { name:"design", label:"Design", type:"select", required:true,
+        options: db.designs.filter(d => d.status === "Approved").map(d => ({ value:d.id, label:d.name + " · " + d.colours + " colour" })) },
+      { name:"fabric", label:"Fabric", type:"select", options: db.fabrics.map(x => ({ value:x.id, label:x.name })) },
+      { name:"metres", label:"Metres to print", type:"number", required:true, min:1 },
+      { name:"machine",label:"Machine", type:"select",
+        options: db.machines.filter(m => m.id.startsWith("P")).map(m => ({ value:m.id, label:m.name })) },
+      { name:"rate",   label:"Printing rate (₹/m)", type:"number", required:true },
+      { name:"operator", label:"Operator", type:"select", options: db.employees.filter(e => ["Processing","Printing"].indexOf(e.dept) > -1).map(e => e.name).concat(["—"]) }
+    ];
+    ERP.modal({
+      title:"New print job", wide:true, okText:"Start job", body: ERP.form(f),
+      onOk(scope){
+        const v = ERP.readForm(scope, f); if(!v) return false;
+        const id = ERP.nextId(db.printJobs, "PJ-", 4);
+        db.printJobs.unshift({ id, date:v.date, design:v.design, fabric:v.fabric, metres:Number(v.metres),
+          machine:v.machine, rate:Number(v.rate), operator:v.operator, status:"Running", wastage:0 });
+        ERP.save(); ERP.toast("Print job " + id + " started."); render();
+      }
+    });
+  }
+  function closeJob(j){
+    const f = [
+      { name:"good", label:"Good metres printed", type:"number", value:j.metres, required:true },
+      { name:"wastage", label:"Wastage (metres)", type:"number", value:0 },
+      { name:"remark", label:"Remark", type:"textarea", full:true, rows:2 }
+    ];
+    ERP.modal({
+      title:"Close " + j.id, okText:"Close job", body: ERP.form(f),
+      onOk(scope){
+        const v = ERP.readForm(scope, f); if(!v) return false;
+        j.status = "Completed"; j.wastage = Number(v.wastage); j.metres = Number(v.good) + Number(v.wastage);
+        ERP.save();
+        const pct = (j.wastage / j.metres) * 100;
+        ERP.toast(j.id + " closed · wastage " + ERP.dec(pct) + "%."); render();
+      }
+    });
+  }
+
+  function render(){
+    const done = db.printJobs.filter(j => j.status === "Completed");
+    const printed = db.printJobs.reduce((s,j) => s + j.metres, 0);
+    const waste = done.reduce((s,j) => s + j.wastage, 0);
+    const wastePct = done.length ? (waste / done.reduce((s,j)=>s+j.metres,0)) * 100 : 0;
+    const value = db.printJobs.reduce((s,j) => s + j.metres*j.rate, 0);
+
+    page.innerHTML = `
+      <div class="page-head">
+        <div class="ph-txt"><h2>Printing</h2>
+          <p>Designs and their approval state, screens and colour counts, and what each machine ran.</p></div>
+        <button class="btn" id="addDesign">New design</button>
+        <button class="btn btn-primary" id="newJob">New print job</button>
+      </div>
+      ${ERP.kpis([
+        { label:"Designs", value: db.designs.length, note: db.designs.filter(d => d.status === "Approved").length + " approved" },
+        { label:"Metres printed", value: ERP.num(printed), tone:"sky" },
+        { label:"Wastage", value: ERP.dec(wastePct) + "%", tone: wastePct > 3 ? "rose" : "teal" },
+        { label:"Printing value", value: ERP.crore(value) }
+      ])}
+      <div class="tabs">
+        <button class="tab ${tab==="jobs"?"is-on":""}" data-tab="jobs">Print jobs</button>
+        <button class="tab ${tab==="designs"?"is-on":""}" data-tab="designs">Designs & screens</button>
+      </div>
+      <div class="card" id="body"></div>`;
+
+    const body = page.querySelector("#body");
+    if(tab === "jobs"){
+      body.innerHTML = ERP.table([
+        { h:"Job", key:"id", cls:"mono strong" },
+        { h:"Date", render:j => ERP.date(j.date) },
+        { h:"Design", render:j => ERP.esc(ERP.nameOf(db.designs, j.design)) },
+        { h:"Fabric", render:j => ERP.esc(ERP.nameOf(db.fabrics, j.fabric)) },
+        { h:"Machine", render:j => ERP.esc(ERP.nameOf(db.machines, j.machine)) },
+        { h:"Metres", cls:"num", render:j => ERP.num(j.metres) },
+        { h:"Rate", cls:"num", render:j => ERP.money(j.rate) },
+        { h:"Value", cls:"num", render:j => ERP.money(j.metres*j.rate) },
+        { h:"Wastage", cls:"num", render:j => j.wastage ? ERP.dec((j.wastage/j.metres)*100) + "%" : "—" },
+        { h:"Operator", key:"operator" },
+        { h:"Status", render:j => ERP.statusBadge(j.status) },
+        { h:"", cls:"num", render:j => j.status !== "Completed" ? `<span class="row-act">
+            <button class="btn btn-sm" data-c="${j.id}">Close</button></span>` : "" }
+      ], db.printJobs);
+      body.querySelectorAll("[data-c]").forEach(b => b.onclick = () => closeJob(ERP.by(db.printJobs, b.dataset.c)));
+    }
+    if(tab === "designs"){ body.innerHTML = designs.html(); designs.wire(body); }
+
+    page.querySelector("#newJob").onclick = newJob;
+    page.querySelector("#addDesign").onclick = () => designs.editor();
+    page.querySelectorAll(".tab").forEach(b => b.onclick = () => { tab = b.dataset.tab; render(); });
+  }
+  render();
+})();
+</script>
+</body></html>

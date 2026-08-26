@@ -1,0 +1,120 @@
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Maintenance · LoomLine Textile ERP</title>
+<meta name="theme-color" content="#141733">
+<script>try{document.documentElement.setAttribute("data-theme",localStorage.getItem("loomline.theme")||"light")}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Sora:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="erp-styles.css">
+</head><body>
+<script src="erp-data.js"></script><script src="erp-core.js"></script>
+<script>
+(function(){
+  const db = ERP.db;
+  const page = ERP.shell({ title:"Maintenance", crumb:"Make", page:"maintenance.html", module:"maintenance" });
+  if(!page) return;
+  let tab = "jobs";
+
+  const mFields = [
+    { name:"machine", label:"Machine", type:"select", required:true,
+      options: db.machines.map(m => ({ value:m.id, label:m.name + " — " + m.make })) },
+    { name:"type",    label:"Type", type:"select", options:["Breakdown","Preventive","Overhaul","Inspection"] },
+    { name:"date",    label:"Date", type:"date", value: ERP.today(), required:true },
+    { name:"reported",label:"Reported by", type:"text", required:true },
+    { name:"fault",   label:"Fault or task", type:"text", required:true, full:true },
+    { name:"technician", label:"Technician", type:"text" },
+    { name:"downtime",label:"Downtime (minutes)", type:"number", value:0 },
+    { name:"cost",    label:"Cost (₹)", type:"number", value:0 },
+    { name:"parts",   label:"Parts used", type:"text", full:true },
+    { name:"status",  label:"Status", type:"select", options:["Open","In progress","Closed"] }
+  ];
+
+  const jobs = ERP.crud({
+    list:"maintenance", prefix:"MT-", width:4, title:"Job", fields:mFields,
+    onSave(rec){
+      const mc = ERP.by(db.machines, rec.machine);
+      if(!mc) return;
+      if(rec.status === "Closed" && mc.status !== "Running") mc.status = "Running";
+      if(rec.status !== "Closed" && rec.type === "Breakdown") mc.status = "Breakdown";
+      if(rec.status !== "Closed" && rec.type === "Preventive") mc.status = "Maintenance";
+      ERP.save();
+    },
+    cols:[
+      { h:"Job", key:"id", cls:"mono strong" },
+      { h:"Machine", render:m => ERP.esc(ERP.nameOf(db.machines, m.machine)) },
+      { h:"Type", render:m => ERP.badge(m.type, m.type === "Breakdown" ? "red" : "violet") },
+      { h:"Date", render:m => ERP.date(m.date) },
+      { h:"Fault or task", key:"fault" },
+      { h:"Technician", key:"technician" },
+      { h:"Downtime", cls:"num", render:m => ERP.num(m.downtime) + " min" },
+      { h:"Cost", cls:"num", render:m => ERP.money(m.cost) },
+      { h:"Status", render:m => ERP.statusBadge(m.status) }
+    ],
+    after: render
+  });
+
+  function render(){
+    const open = db.maintenance.filter(m => m.status !== "Closed");
+    const down = db.maintenance.reduce((s,m) => s + m.downtime, 0);
+    const cost = db.maintenance.reduce((s,m) => s + m.cost, 0);
+    const mtbf = db.maintenance.filter(m => m.type === "Breakdown").length;
+    const overdue = db.maintSchedule.filter(s => new Date(s.next) <= new Date(ERP.today()));
+
+    page.innerHTML = `
+      <div class="page-head">
+        <div class="ph-txt"><h2>Machine maintenance</h2>
+          <p>Breakdowns, preventive jobs, downtime and spend — machine by machine.</p></div>
+        <button class="btn btn-primary" id="add">Log a job</button>
+      </div>
+      ${ERP.kpis([
+        { label:"Open jobs", value: open.length, note: open.filter(m => m.type === "Breakdown").length + " breakdowns", tone: open.length ? "rose" : "teal" },
+        { label:"Downtime", value: ERP.num(down) + " min", note:"Across all logged jobs", tone:"amber" },
+        { label:"Maintenance spend", value: ERP.crore(cost) },
+        { label:"Breakdowns", value: mtbf, tone:"sky" },
+        { label:"Schedules due", value: overdue.length, tone: overdue.length ? "amber" : "teal" }
+      ])}
+      <div class="tabs">
+        <button class="tab ${tab==="jobs"?"is-on":""}" data-tab="jobs">Job cards</button>
+        <button class="tab ${tab==="sched"?"is-on":""}" data-tab="sched">Preventive schedule</button>
+        <button class="tab ${tab==="machines"?"is-on":""}" data-tab="machines">By machine</button>
+      </div>
+      <div class="card" id="body"></div>`;
+
+    const body = page.querySelector("#body");
+    if(tab === "jobs"){ body.innerHTML = jobs.html(); jobs.wire(body); }
+    if(tab === "sched"){
+      body.innerHTML = ERP.table([
+        { h:"Machine", render:s => ERP.esc(ERP.nameOf(db.machines, s.machine)) },
+        { h:"Task", key:"task", cls:"strong" },
+        { h:"Every", key:"every" },
+        { h:"Last done", render:s => ERP.date(s.last) },
+        { h:"Next due", render:s => ERP.date(s.next) },
+        { h:"", render:s => new Date(s.next) <= new Date(ERP.today())
+            ? ERP.badge("Due now","red") : ERP.badge("Scheduled","green") }
+      ], db.maintSchedule);
+    }
+    if(tab === "machines"){
+      const rows = db.machines.map(m => {
+        const js = db.maintenance.filter(x => x.machine === m.id);
+        return { m, n:js.length, down: js.reduce((s,x)=>s+x.downtime,0), cost: js.reduce((s,x)=>s+x.cost,0),
+                 open: js.filter(x => x.status !== "Closed").length };
+      });
+      body.innerHTML = ERP.table([
+        { h:"Machine", render:r => ERP.esc(r.m.name), cls:"strong" },
+        { h:"Make", render:r => ERP.esc(r.m.make) },
+        { h:"Installed", render:r => ERP.date(r.m.installed) },
+        { h:"Jobs", cls:"num", render:r => r.n },
+        { h:"Open", cls:"num", render:r => r.open || "—" },
+        { h:"Downtime", cls:"num", render:r => ERP.num(r.down) + " min" },
+        { h:"Spend", cls:"num", render:r => ERP.money(r.cost) },
+        { h:"Status", render:r => ERP.statusBadge(r.m.status) }
+      ], rows);
+    }
+
+    page.querySelector("#add").onclick = () => jobs.editor();
+    page.querySelectorAll(".tab").forEach(b => b.onclick = () => { tab = b.dataset.tab; render(); });
+  }
+  render();
+})();
+</script>
+</body></html>
