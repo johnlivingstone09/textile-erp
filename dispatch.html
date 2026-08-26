@@ -1,0 +1,165 @@
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dispatch · LoomLine Textile ERP</title>
+<meta name="theme-color" content="#141733">
+<script>try{document.documentElement.setAttribute("data-theme",localStorage.getItem("loomline.theme")||"light")}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Sora:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="erp-styles.css">
+</head><body>
+<script src="erp-data.js"></script><script src="erp-core.js"></script>
+
+<script>
+(function(){
+  const db = ERP.db;
+  const page = ERP.shell({ title:"Dispatch challans", crumb:"Sell", page:"dispatch.html", module:"dispatch" });
+  if(!page) return;
+  let tab = "dispatch";
+
+  const dcFields = [
+    { name:"date",       label:"Date", type:"date", required:true },
+    { name:"so",         label:"Sales order", type:"select", options: db.salesOrders.map(o => o.id) },
+    { name:"metres",     label:"Metres", type:"number", required:true, min:1 },
+    { name:"vehicle",    label:"Vehicle number", type:"text", required:true },
+    { name:"transporter",label:"Transporter", type:"text", required:true },
+    { name:"eway",       label:"E-way bill number", type:"text" },
+    { name:"status",     label:"Status", type:"select", options:["Loading","In transit","Delivered","Returned"] }
+  ];
+
+  const act = ERP.actions({
+    list:"dispatches", title:"Challan", fields: dcFields,
+    canDelete: dc => db.invoices.some(i => i.dc === dc.id) ? "An invoice is raised against this challan." : null,
+    onSave(dc){
+      const so = ERP.by(db.salesOrders, dc.so);
+      if(so){
+        so.dispatched = db.dispatches.filter(x => x.so === so.id).reduce((s,x) => s + x.metres, 0);
+        so.packed = Math.max(so.packed, so.dispatched);
+        so.status = so.dispatched >= so.qty ? "Completed" : "In production";
+        ERP.save();
+      }
+    },
+    after: render
+  });
+
+  function packModal(){
+    const live = db.salesOrders.filter(o => o.passed > o.dispatched);
+    if(!live.length){ ERP.toast("No quality-passed fabric is waiting to go out.", true); return; }
+    const fields = [
+      { name:"so", label:"Sales order", type:"select", required:true,
+        options: live.map(o => ({ value:o.id, label:o.id + " — " + ERP.nameOf(db.customers,o.customer) + " · " + ERP.num(o.passed-o.dispatched) + " m ready" })) },
+      { name:"metres", label:"Metres to dispatch", type:"number", required:true, min:1 },
+      { name:"vehicle", label:"Vehicle number", type:"text", required:true },
+      { name:"transporter", label:"Transporter", type:"text", required:true },
+      { name:"eway", label:"E-way bill number", type:"text" },
+      { name:"invoice", label:"Raise the invoice too", type:"select",
+        options:[{ value:"gst", label:"Yes — tax invoice with GST" },
+                 { value:"none", label:"Yes — bill of supply, no GST" },
+                 { value:"no", label:"No, invoice it later" }] }
+    ];
+    const m = ERP.modal({
+      title:"Pack and dispatch", wide:true, okText:"Create challan", body: ERP.form(fields),
+      onOk(scope){
+        const v = ERP.readForm(scope, fields); if(!v) return false;
+        const so = ERP.by(db.salesOrders, v.so);
+        const metres = Math.min(Number(v.metres), so.passed - so.dispatched);
+        if(metres <= 0){ ERP.toast("There is nothing passed and undispatched on that order.", true); return false; }
+        const id = ERP.nextId(db.dispatches, "DC-", 4);
+        const dc = { id, date: ERP.today(), so:so.id, customer:so.customer, rolls:[], metres,
+          vehicle:v.vehicle, transporter:v.transporter, eway:v.eway || "—", status:"Loading" };
+        db.dispatches.unshift(dc);
+        so.dispatched += metres;
+        so.packed = Math.max(so.packed, so.dispatched);
+        if(so.dispatched >= so.qty) so.status = "Completed";
+        let msg = "Challan " + id + " created.";
+        if(v.invoice !== "no"){
+          const fab = ERP.by(db.fabrics, so.fabric);
+          const withGst = v.invoice === "gst";
+          let max = 0;
+          db.invoices.forEach(i => { const mm = String(i.id).match(/(\d+)$/); if(mm) max = Math.max(max, +mm[1]); });
+          const inv = { id:"IN-2026-" + String(max+1).padStart(4,"0"), date: ERP.today(),
+            type: withGst ? "Tax invoice" : "Bill of supply", customer:so.customer, so:so.id, dc:id,
+            gstMode: withGst ? "gst" : "none", gstRate: withGst ? 5 : 0, discount:0, freight:0,
+            paid:0, status:"Unpaid", notes:"",
+            items:[{ desc: fab.name + " · " + fab.gsm + " GSM · " + fab.width + '"', hsn: fab.hsn || "5208",
+              qty: metres, unit:"m", rate: so.rate }] };
+          db.invoices.unshift(inv);
+          ERP.by(db.customers, so.customer).outstanding += ERP.docTotals(inv).grand;
+          msg += " " + inv.type + " " + inv.id + " raised for " + ERP.money(ERP.docTotals(inv).grand) + ".";
+          ERP.save(); ERP.toast(msg); render();
+          ERP.printDoc("invoice", inv);
+          return;
+        }
+        ERP.save(); ERP.toast(msg); render();
+      }
+    });
+    m.el.querySelector('[name="so"]').addEventListener("change", e => {
+      const so = ERP.by(db.salesOrders, e.target.value);
+      m.el.querySelector('[name="metres"]').value = so.passed - so.dispatched;
+    });
+    m.el.querySelector('[name="so"]').dispatchEvent(new Event("change"));
+  }
+
+  function render(){
+    const due = db.invoices.reduce((s,i) => s + ERP.docTotals(i).due, 0);
+    page.innerHTML = `
+      <div class="page-head">
+        <div class="ph-txt"><h2>Dispatch</h2>
+          <p>Only quality-passed metres can leave. The invoice can be raised with the challan,
+             with or without GST, or left for the Invoices screen.</p></div>
+        <a class="btn" href="invoices.html">Invoices</a>
+        <button class="btn btn-primary" id="pack">Pack and dispatch</button>
+      </div>
+      ${ERP.kpis([
+        { label:"Dispatched", value: ERP.num(db.dispatches.reduce((s,d)=>s+d.metres,0)) + " m", note: db.dispatches.length + " challans" },
+        { label:"On the road", value: db.dispatches.filter(d => d.status !== "Delivered").length + " loads", tone:"sky" },
+        { label:"Invoiced", value: ERP.crore(db.invoices.reduce((s,i)=>s+ERP.docTotals(i).grand,0)) },
+        { label:"Outstanding", value: ERP.crore(due), tone:"rose" }
+      ])}
+      <div class="tabs">
+        <button class="tab ${tab==="dispatch"?"is-on":""}" data-tab="dispatch">Challans</button>
+        <button class="tab ${tab==="ageing"?"is-on":""}" data-tab="ageing">Customer ageing</button>
+      </div>
+      <div class="card" id="body"></div>`;
+
+    const body = page.querySelector("#body");
+    if(tab === "dispatch"){
+      body.innerHTML = ERP.table([
+        { h:"Challan", key:"id", cls:"mono strong" },
+        { h:"Date", render:d => ERP.date(d.date) },
+        { h:"Order", key:"so", cls:"mono" },
+        { h:"Customer", render:d => ERP.esc(ERP.nameOf(db.customers,d.customer)) },
+        { h:"Metres", cls:"num", render:d => ERP.num(d.metres) },
+        { h:"Vehicle", key:"vehicle", cls:"mono" },
+        { h:"Transporter", key:"transporter" },
+        { h:"E-way bill", key:"eway", cls:"mono" },
+        { h:"Invoice", render:d => { const i = db.invoices.find(x => x.dc === d.id);
+            return i ? `<a class="mono" href="invoices.html?q=${i.id}">${i.id}</a>` : ERP.badge("Not raised","amber"); } },
+        { h:"Status", render:d => ERP.statusBadge(d.status) },
+        act.col
+      ], db.dispatches);
+      act.wire(body);
+    }
+    if(tab === "ageing"){
+      const rows = db.customers.map(c => {
+        const inv = db.invoices.filter(i => i.customer === c.id && ERP.docTotals(i).due > 1);
+        const owed = inv.reduce((s,i) => s + ERP.docTotals(i).due, 0);
+        return { c, n:inv.length, owed, used: c.credit ? (c.outstanding/c.credit)*100 : 0 };
+      });
+      body.innerHTML = ERP.table([
+        { h:"Customer", render:r => ERP.esc(r.c.name) + ", " + ERP.esc(r.c.city), cls:"strong" },
+        { h:"State", render:r => ERP.esc(r.c.state || "—") + " (" + ERP.esc(r.c.stateCode || "—") + ")" },
+        { h:"Terms", render:r => r.c.terms },
+        { h:"Open invoices", cls:"num", render:r => r.n || "—" },
+        { h:"Due on invoices", cls:"num", render:r => r.owed ? ERP.money(r.owed) : "—" },
+        { h:"Ledger outstanding", cls:"num", render:r => ERP.crore(r.c.outstanding) },
+        { h:"Credit limit", cls:"num", render:r => ERP.crore(r.c.credit) },
+        { h:"Limit used", render:r => ERP.bar(r.used, r.used > 80 ? "bad" : r.used > 60 ? "warn" : "ok") }
+      ], rows);
+    }
+    page.querySelector("#pack").onclick = packModal;
+    page.querySelectorAll(".tab").forEach(b => b.onclick = () => { tab = b.dataset.tab; render(); });
+  }
+  render();
+})();
+</script>
+</body></html>

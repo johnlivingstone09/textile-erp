@@ -1,0 +1,248 @@
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Invoices · LoomLine Textile ERP</title>
+<meta name="theme-color" content="#141733">
+<script>try{document.documentElement.setAttribute("data-theme",localStorage.getItem("loomline.theme")||"light")}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Sora:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="erp-styles.css">
+</head><body>
+<script src="erp-data.js"></script><script src="erp-core.js"></script>
+<script>
+(function(){
+  const db = ERP.db;
+  const page = ERP.shell({ title:"Invoices", crumb:"Sell", page:"invoices.html", module:"invoices" });
+  if(!page) return;
+  let tab = "all", q = ERP.param("q") || "";
+
+  const headFields = () => ([
+    { name:"date",     label:"Invoice date", type:"date", required:true },
+    { name:"customer", label:"Customer", type:"select", required:true,
+      options: db.customers.map(c => ({ value:c.id, label:c.name + " — " + c.city + " (" + (c.stateCode||"33") + ")" })) },
+    { name:"gstMode",  label:"Tax", type:"select", options:[
+        { value:"gst",  label:"With GST — tax invoice" },
+        { value:"none", label:"Without GST — bill of supply" }] },
+    { name:"gstRate",  label:"GST rate (%)", type:"select", options:["0","5","12","18","28"] },
+    { name:"so",       label:"Against sales order", type:"select", options:[""].concat(db.salesOrders.map(o => o.id)) },
+    { name:"dc",       label:"Against challan", type:"select", options:[""].concat(db.dispatches.map(d => d.id)) },
+    { name:"discount", label:"Discount (₹)", type:"number", value:0 },
+    { name:"freight",  label:"Freight / packing (₹)", type:"number", value:0 },
+    { name:"status",   label:"Status", type:"select", options:["Unpaid","Part paid","Paid","Cancelled"] },
+    { name:"notes",    label:"Note printed on the invoice", type:"textarea", full:true, rows:2 }
+  ]);
+
+  function nextInvoiceId(){
+    let max = 0;
+    db.invoices.forEach(i => { const m = String(i.id).match(/(\d+)$/); if(m) max = Math.max(max, +m[1]); });
+    return "IN-2026-" + String(max + 1).padStart(4, "0");
+  }
+
+  function editor(rec, seed){
+    const isNew = !rec;
+    const base = rec || Object.assign({
+      date: ERP.today(), customer: db.customers[0].id, gstMode:"gst", gstRate:5, so:"", dc:"",
+      discount:0, freight:0, paid:0, status:"Unpaid", notes:"",
+      items:[{ desc:"", hsn:"5208", qty:"", unit:"m", rate:"" }]
+    }, seed || {});
+    const fields = headFields();
+    const m = ERP.modal({
+      title: isNew ? "New invoice" : "Edit " + rec.id, wide:true,
+      okText: isNew ? "Create invoice" : "Save changes",
+      body: ERP.form(fields, base) +
+        `<h4 style="margin:20px 0 9px">Lines</h4>${ERP.lineItems.html(base.items)}
+         <div class="grid g-2" style="margin-top:16px"><div id="taxnote"></div><div id="tot"></div></div>`,
+      onOk(scope){
+        const v = ERP.readForm(scope, fields);
+        if(!v) return false;
+        const items = ERP.lineItems.read(scope);
+        if(!items.length){ ERP.toast("Add at least one line with a description and a quantity.", true); return false; }
+        const doc = Object.assign({}, base, v, { items, gstRate: Number(v.gstRate),
+          discount:Number(v.discount), freight:Number(v.freight),
+          type: v.gstMode === "gst" ? "Tax invoice" : "Bill of supply" });
+        if(doc.gstMode === "none") doc.gstRate = 0;
+        const cust = ERP.by(db.customers, doc.customer);
+        if(isNew){
+          doc.id = nextInvoiceId(); doc.paid = 0;
+          db.invoices.unshift(doc);
+          cust.outstanding += ERP.docTotals(doc).grand;
+        } else {
+          const before = ERP.docTotals(rec).grand - (rec.paid || 0);
+          Object.assign(rec, doc);
+          const after = ERP.docTotals(rec).grand - (rec.paid || 0);
+          cust.outstanding = Math.max(0, cust.outstanding - before + after);
+        }
+        ERP.save();
+        ERP.toast(isNew ? doc.type + " " + doc.id + " created." : rec.id + " updated.");
+        render();
+        if(isNew) ERP.printDoc("invoice", doc);
+      }
+    });
+    const live = () => {
+      const v = {};
+      ["gstMode","gstRate","discount","freight","customer"].forEach(n => v[n] = m.el.querySelector(`[name="${n}"]`).value);
+      const doc = { items: ERP.lineItems.read(m.el), gstMode:v.gstMode, gstRate:Number(v.gstRate),
+        discount:Number(v.discount), freight:Number(v.freight), customer:v.customer };
+      const t = ERP.docTotals(doc);
+      m.el.querySelector("#tot").innerHTML = ERP.totalsBlock(doc);
+      const cust = ERP.by(db.customers, v.customer) || {};
+      m.el.querySelector("#taxnote").innerHTML = v.gstMode === "gst"
+        ? `<div class="note ${t.interState ? "violet" : "good"}">
+             ${ERP.esc(cust.name || "")} is in ${ERP.esc(cust.state || "—")} (${ERP.esc(cust.stateCode || "—")}) and you supply from
+             ${ERP.esc(db.company.state)} (${db.company.stateCode}), so this is
+             <b>${t.interState ? "inter-state — IGST at " + ERP.dec(t.rate,0) + "%" :
+               "intra-state — CGST and SGST at " + ERP.dec(t.rate/2,2) + "% each"}</b>.
+             The document heading will read <b>Tax invoice</b>.</div>`
+        : `<div class="note">No tax will be charged or shown. The document heading will read
+             <b>Bill of supply</b> — the correct form for an unregistered buyer or an exempt supply.
+             Do not use it for a taxable supply to a registered buyer.</div>`;
+      m.el.querySelector('[name="gstRate"]').disabled = v.gstMode !== "gst";
+      m.el.querySelector('[data-field="gstRate"]').style.opacity = v.gstMode === "gst" ? "1" : ".4";
+    };
+    ERP.lineItems.wire(m.el, live);
+    m.el.querySelectorAll('[name="gstMode"],[name="gstRate"],[name="discount"],[name="freight"],[name="customer"]')
+      .forEach(el => el.addEventListener("input", live));
+    // pull lines from a chosen sales order
+    m.el.querySelector('[name="so"]').addEventListener("change", e => {
+      const so = ERP.by(db.salesOrders, e.target.value);
+      if(!so) return;
+      const f = ERP.by(db.fabrics, so.fabric);
+      const pending = Math.max(so.dispatched - 0, 0) || so.qty;
+      m.el.querySelector('[name="customer"]').value = so.customer;
+      const rows = m.el.querySelector("[data-rows]");
+      rows.innerHTML = ERP.lineItems.row({ desc: f.name + " · " + f.gsm + " GSM · " + f.width + '"',
+        hsn: f.hsn || "5208", qty: pending, unit:"m", rate: so.rate });
+      live();
+    });
+    live();
+  }
+
+  function payment(inv){
+    const t = ERP.docTotals(inv);
+    const f = [
+      { name:"amt",  label:"Amount received (₹)", type:"number", value: Math.round(t.due), required:true },
+      { name:"mode", label:"Mode", type:"select", options:["NEFT","RTGS","UPI","Cheque","Cash"] },
+      { name:"date", label:"Received on", type:"date", value: ERP.today() }
+    ];
+    ERP.modal({
+      title:"Payment against " + inv.id,
+      sub:`Invoice ${ERP.money(t.grand)} · received so far ${ERP.money(inv.paid || 0)} · due ${ERP.money(t.due)}`,
+      okText:"Record payment", body: ERP.form(f),
+      onOk(scope){
+        const v = ERP.readForm(scope, f); if(!v) return false;
+        const amt = Number(v.amt);
+        if(amt > t.due + 1){ ERP.toast("That is more than the " + ERP.money(t.due) + " outstanding on this invoice.", true); return false; }
+        inv.paid = (inv.paid || 0) + amt;
+        inv.status = inv.paid >= t.grand - 1 ? "Paid" : "Part paid";
+        const c = ERP.by(db.customers, inv.customer);
+        c.outstanding = Math.max(0, c.outstanding - amt);
+        ERP.save(); ERP.toast(ERP.money(amt) + " recorded against " + inv.id + "."); render();
+      }
+    });
+  }
+
+  const act = ERP.actions({
+    list:"invoices", title:"Invoice", fields: headFields(), editor: editor,
+    canDelete: inv => (inv.paid > 0) ? "Payments are recorded against this invoice. Cancel it instead." : null,
+    deleteNote:"Nothing has been received against this invoice, so it can be removed. The customer's outstanding will be reduced.",
+    after: render
+  });
+  const removeInner = act.remove;
+  act.remove = inv => {
+    const before = ERP.docTotals(inv).grand - (inv.paid || 0);
+    const cust = ERP.by(db.customers, inv.customer);
+    const after = () => { cust.outstanding = Math.max(0, cust.outstanding - before); ERP.save(); };
+    if(inv.paid > 0){ ERP.toast("Payments are recorded against this invoice. Cancel it instead.", true); return; }
+    ERP.confirm({ title:"Delete " + inv.id + "?",
+      body:"Nothing has been received against it, so it can be removed cleanly and the customer's outstanding reduced by " + ERP.money(before) + ".",
+      okText:"Delete invoice",
+      onOk(){ db.invoices.splice(db.invoices.indexOf(inv), 1); after(); ERP.toast(inv.id + " deleted."); render(); }
+    });
+  };
+
+  function render(){
+    const s = q.toUpperCase();
+    let rows = db.invoices.filter(i => !s || i.id.toUpperCase().includes(s) ||
+      ERP.nameOf(db.customers, i.customer).toUpperCase().includes(s));
+    if(tab === "gst")  rows = rows.filter(i => i.gstMode === "gst");
+    if(tab === "nogst")rows = rows.filter(i => i.gstMode !== "gst");
+    if(tab === "due")  rows = rows.filter(i => ERP.docTotals(i).due > 1);
+
+    const billed = db.invoices.reduce((t,i) => t + ERP.docTotals(i).grand, 0);
+    const due = db.invoices.reduce((t,i) => t + ERP.docTotals(i).due, 0);
+    const tax = db.invoices.reduce((t,i) => t + ERP.docTotals(i).tax, 0);
+
+    page.innerHTML = `
+      <div class="page-head">
+        <div class="ph-txt"><h2>Invoices</h2>
+          <p>Raise a tax invoice or a bill of supply, edit anything on it, print it, and record what comes in.
+             CGST and SGST split automatically for Tamil Nadu buyers; IGST for anyone outside.</p></div>
+        <button class="btn" id="fromOrder">Invoice a sales order</button>
+        <button class="btn btn-primary" id="new">New invoice</button>
+      </div>
+      ${ERP.kpis([
+        { label:"Invoices", value: db.invoices.length, note: db.invoices.filter(i => i.gstMode !== "gst").length + " without GST" },
+        { label:"Billed", value: ERP.crore(billed), tone:"sky" },
+        { label:"Tax collected", value: ERP.crore(tax), note:"Output GST this period", tone:"violet" },
+        { label:"Outstanding", value: ERP.crore(due), tone:"rose" },
+        { label:"Received", value: ERP.crore(billed - due), tone:"teal" }
+      ])}
+      <div class="tabs">
+        <button class="tab ${tab==="all"?"is-on":""}" data-tab="all">All</button>
+        <button class="tab ${tab==="gst"?"is-on":""}" data-tab="gst">Tax invoices</button>
+        <button class="tab ${tab==="nogst"?"is-on":""}" data-tab="nogst">Without GST</button>
+        <button class="tab ${tab==="due"?"is-on":""}" data-tab="due">Outstanding</button>
+      </div>
+      <div class="filters"><input id="q" type="search" placeholder="Search invoice or customer" value="${ERP.esc(q)}"></div>
+      <div class="card" id="body"></div>`;
+
+    const body = page.querySelector("#body");
+    body.innerHTML = ERP.table([
+      { h:"Invoice", key:"id", cls:"mono strong" },
+      { h:"Type", render:i => i.gstMode === "gst" ? ERP.badge("Tax invoice","violet") : ERP.badge("Bill of supply","grey") },
+      { h:"Date", render:i => ERP.date(i.date) },
+      { h:"Customer", render:i => ERP.esc(ERP.nameOf(db.customers, i.customer)) },
+      { h:"Taxable", cls:"num", render:i => ERP.money(ERP.docTotals(i).taxable) },
+      { h:"Tax", cls:"num", render:i => { const t = ERP.docTotals(i);
+          return t.withTax ? (t.interState ? "IGST " : "C+S ") + ERP.money(t.tax) : "—"; } },
+      { h:"Total", cls:"num", render:i => `<b>${ERP.money(ERP.docTotals(i).grand)}</b>` },
+      { h:"Received", cls:"num", render:i => i.paid ? ERP.money(i.paid) : "—" },
+      { h:"Due", cls:"num", render:i => { const d = ERP.docTotals(i).due; return d > 1 ? `<span style="color:var(--rose)">${ERP.money(d)}</span>` : "—"; } },
+      { h:"Status", render:i => ERP.statusBadge(i.status) },
+      { h:"", cls:"num", render:i => `<span class="row-act">
+          <button class="btn btn-sm" data-print="${i.id}">Print</button>
+          ${ERP.docTotals(i).due > 1 ? `<button class="btn btn-sm" data-pay="${i.id}">Payment</button>` : ""}
+        </span>` },
+      act.col
+    ], rows, { emptyTitle:"No invoices here", emptyText:"Raise one from an order or from scratch." });
+
+    act.wire(body);
+    body.querySelectorAll("[data-print]").forEach(b => b.onclick = () =>
+      ERP.printDoc("invoice", ERP.by(db.invoices, b.dataset.print)));
+    body.querySelectorAll("[data-pay]").forEach(b => b.onclick = () =>
+      payment(ERP.by(db.invoices, b.dataset.pay)));
+
+    page.querySelector("#new").onclick = () => editor(null);
+    page.querySelector("#fromOrder").onclick = () => {
+      const open = db.salesOrders.filter(o => o.dispatched > 0 || o.status !== "Draft");
+      if(!open.length){ ERP.toast("No sales order is ready to invoice.", true); return; }
+      const f = [{ name:"so", label:"Sales order", type:"select", required:true,
+        options: open.map(o => ({ value:o.id, label:o.id + " — " + ERP.nameOf(db.customers,o.customer) + " · " + ERP.num(o.qty) + " m" })) }];
+      ERP.modal({ title:"Invoice a sales order", okText:"Continue", body: ERP.form(f),
+        onOk(scope){
+          const v = ERP.readForm(scope, f); if(!v) return false;
+          const so = ERP.by(db.salesOrders, v.so);
+          const fab = ERP.by(db.fabrics, so.fabric);
+          editor(null, { customer:so.customer, so:so.id,
+            items:[{ desc: fab.name + " · " + fab.gsm + " GSM · " + fab.width + '"',
+              hsn: fab.hsn || "5208", qty: so.dispatched || so.qty, unit:"m", rate: so.rate }] });
+        }});
+    };
+    page.querySelectorAll(".tab").forEach(b => b.onclick = () => { tab = b.dataset.tab; render(); });
+    const qi = page.querySelector("#q");
+    qi.oninput = () => { q = qi.value; const p = qi.selectionStart; render();
+      const n = page.querySelector("#q"); n.focus(); n.setSelectionRange(p,p); };
+  }
+  render();
+})();
+</script>
+</body></html>

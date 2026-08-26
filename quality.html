@@ -1,0 +1,169 @@
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quality control · LoomLine Textile ERP</title>
+<meta name="theme-color" content="#141733">
+<script>try{document.documentElement.setAttribute("data-theme",localStorage.getItem("loomline.theme")||"light")}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Sora:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="erp-styles.css">
+</head><body>
+<script src="erp-data.js"></script><script src="erp-core.js"></script>
+
+<script>
+(function(){
+  const db = ERP.db;
+  const page = ERP.shell({ title:"Quality control", crumb:"Make", page:"quality.html", module:"quality" });
+  if(!page) return;
+  let tab = "inspections";
+
+  /* 4-point system: defect points per 100 square yards */
+  function gradeFor(points, metres, widthIn){
+    const sqyd = (metres * 1.09361) * (widthIn / 36);
+    const per100 = sqyd ? (points / sqyd) * 100 : 0;
+    return { per100, grade: per100 <= 20 ? "A" : per100 <= 40 ? "B" : "C" };
+  }
+
+  function inspectModal(){
+    const open = db.rolls.filter(r => !db.inspections.some(i => i.roll === r.id));
+    if(!open.length){ ERP.toast("Every roll on the floor has been inspected."); return; }
+    const fields = [
+      { name:"roll", label:"Roll", type:"select", required:true,
+        options: open.map(r => ({ value:r.id, label:r.id + " — " + ERP.nameOf(db.fabrics,r.fabric) + " · " + r.metres + " m" })) },
+      { name:"inspector", label:"Inspector", type:"select", options: db.employees.filter(e => e.dept === "Quality").map(e => e.name) },
+      { name:"gsm", label:"GSM measured", type:"number" },
+      { name:"width", label:"Width measured (in)", type:"number" }
+    ];
+    const defFields = db.defectTypes.map(t => ({ name:"d_" + t.replace(/\W/g,""), label:t, type:"number", value:0, min:0 }));
+    const m = ERP.modal({
+      title:"4-point roll inspection", wide:true, okText:"Save inspection",
+      body: ERP.form(fields) + `<h4 style="margin:18px 0 8px">Defects counted</h4>` + ERP.form(defFields) +
+            `<div id="calc" style="margin-top:16px"></div>`,
+      onOk(scope){
+        const v = ERP.readForm(scope, fields.concat(defFields));
+        if(!v) return false;
+        const roll = ERP.by(db.rolls, v.roll);
+        const defects = db.defectTypes.map(t => ({ type:t, n: Number(v["d_" + t.replace(/\W/g,"")]) || 0 })).filter(d => d.n);
+        const points = defects.reduce((s,d) => s + d.n * 2, 0);
+        const g = gradeFor(points, roll.metres, roll.width);
+        const id = ERP.nextId(db.inspections, "QC-", 4);
+        db.inspections.unshift({ id, roll:roll.id, date: ERP.today(), inspector:v.inspector,
+          points, grade:g.grade, defects });
+        roll.grade = g.grade; roll.points = points;
+        roll.status = g.grade === "A" ? "In stock" : g.grade === "B" ? "On hold" : "Rejected";
+        const so = ERP.by(db.salesOrders, roll.so);
+        if(so && g.grade === "A") so.passed = Math.min(so.qty, so.passed + roll.metres);
+        ERP.save(); ERP.toast(roll.id + " graded " + g.grade + " at " + ERP.dec(g.per100) + " points per 100 sq yd."); render();
+      }
+    });
+    function refresh(){
+      const roll = ERP.by(db.rolls, m.el.querySelector('[name="roll"]').value);
+      let points = 0;
+      db.defectTypes.forEach(t => { points += (Number(m.el.querySelector(`[name="d_${t.replace(/\W/g,"")}"]`).value) || 0) * 2; });
+      const g = gradeFor(points, roll.metres, roll.width);
+      m.el.querySelector("#calc").innerHTML = `
+        <div class="def">
+          <div><dt>Roll length</dt><dd>${roll.metres} m</dd></div>
+          <div><dt>Total points</dt><dd>${points}</dd></div>
+          <div><dt>Points / 100 sq yd</dt><dd>${ERP.dec(g.per100)}</dd></div>
+          <div><dt>Grade</dt><dd>${ERP.statusBadge(g.grade === "A" ? "In stock" : g.grade === "B" ? "On hold" : "Rejected")} ${g.grade}</dd></div>
+        </div>
+        <div class="note" style="margin-top:12px">Four points is the maximum per linear metre. Grade A up to 20 points
+          per 100 square yards, B up to 40, C above that.</div>`;
+    }
+    m.el.querySelectorAll("input,select").forEach(e => e.addEventListener("input", refresh));
+    refresh();
+  }
+
+  const qcAct = ERP.actions({
+    list:"inspections", title:"Inspection",
+    fields:[
+      { name:"date", label:"Date", type:"date", required:true },
+      { name:"inspector", label:"Inspector", type:"text" },
+      { name:"points", label:"Total points", type:"number", required:true },
+      { name:"grade", label:"Grade", type:"select", options:["A","B","C"] }
+    ],
+    onSave(rec){
+      const roll = ERP.by(db.rolls, rec.roll);
+      if(roll){ roll.grade = rec.grade; roll.points = Number(rec.points);
+        roll.status = rec.grade === "A" ? "In stock" : rec.grade === "B" ? "On hold" : "Rejected"; ERP.save(); }
+    },
+    deleteNote:"The roll goes back to being uninspected and can be inspected again.",
+    after: () => render()
+  });
+
+  function render(){
+    const ins = db.inspections;
+    const byGrade = ["A","B","C"].map(g => ins.filter(i => i.grade === g).length);
+    const defTotals = {};
+    ins.forEach(i => i.defects.forEach(d => { defTotals[d.type] = (defTotals[d.type] || 0) + d.n; }));
+    const defRows = Object.entries(defTotals).sort((a,b) => b[1]-a[1]);
+    const byMachine = {};
+    ins.forEach(i => {
+      const r = ERP.by(db.rolls, i.roll); if(!r) return;
+      byMachine[r.machine] = byMachine[r.machine] || { points:0, rolls:0 };
+      byMachine[r.machine].points += i.points; byMachine[r.machine].rolls++;
+    });
+    const machRows = Object.entries(byMachine).map(([id,v]) => ({ id, ...v, avg: v.points/v.rolls }))
+      .sort((a,b) => b.avg - a.avg);
+
+    page.innerHTML = `
+      <div class="page-head"><div class="ph-txt"><h2>Inspection</h2>
+        <p>4-point system. Points, points per 100 square yards and grade are worked out for you.</p></div>
+        <button class="btn btn-primary" id="new">Inspect a roll</button></div>
+      ${ERP.kpis([
+        { label:"Rolls inspected", value: ins.length },
+        { label:"Grade A", value: byGrade[0], tone:"teal" },
+        { label:"Grade B", value: byGrade[1], tone:"amber" },
+        { label:"Grade C / rejected", value: byGrade[2], tone:"rose" },
+        { label:"Pass rate", value: ins.length ? ERP.dec((byGrade[0]/ins.length)*100) + "%" : "—" }
+      ])}
+      <div class="tabs">
+        <button class="tab ${tab==="inspections"?"is-on":""}" data-tab="inspections">Inspections</button>
+        <button class="tab ${tab==="defects"?"is-on":""}" data-tab="defects">Defect analysis</button>
+      </div>
+      <div id="body"></div>`;
+
+    const body = page.querySelector("#body");
+    if(tab === "inspections"){
+      body.innerHTML = `<div class="card">` + ERP.table([
+        { h:"Report", key:"id", cls:"mono" },
+        { h:"Roll", render:i => `<a class="mono" href="traceability.html?roll=${i.roll}">${i.roll}</a>` },
+        { h:"Date", render:i => ERP.date(i.date) },
+        { h:"Machine", render:i => { const r = ERP.by(db.rolls,i.roll); return r ? ERP.esc(ERP.nameOf(db.machines,r.machine)) : "—"; } },
+        { h:"Points", cls:"num", key:"points" },
+        { h:"Grade", render:i => ERP.badge(i.grade, i.grade === "A" ? "green" : i.grade === "B" ? "amber" : "red") },
+        { h:"Defects found", render:i => ERP.esc(i.defects.map(d => d.type + " ×" + d.n).join(", ")) },
+        { h:"Inspector", key:"inspector" },
+        qcAct.col
+      ], ins) + `</div>`;
+      qcAct.wire(body);
+    }
+    if(tab === "defects"){
+      body.innerHTML = `<div class="grid g-2">
+        <div class="card"><div class="card-head"><h3>Defects by type</h3></div>
+          ${ERP.table([
+            { h:"Defect", render:r => ERP.esc(r[0]) },
+            { h:"Count", cls:"num", render:r => r[1] },
+            { h:"Share", render:r => ERP.bar((r[1] / defRows.reduce((s,x)=>s+x[1],0)) * 100) }
+          ], defRows)}</div>
+        <div class="card"><div class="card-head"><h3>Points by machine</h3>
+          <span class="card-sub">average points per roll</span></div>
+          ${ERP.table([
+            { h:"Machine", render:r => ERP.esc(ERP.nameOf(db.machines, r.id)) },
+            { h:"Rolls", cls:"num", render:r => r.rolls },
+            { h:"Total points", cls:"num", render:r => r.points },
+            { h:"Average", cls:"num", render:r => ERP.dec(r.avg) },
+            { h:"", render:r => r.avg > 20 ? ERP.badge("Investigate","red") : ERP.badge("Normal","green") }
+          ], machRows)}
+          <div class="card-body"><div class="note red">The same yarn lot runs clean on other machines — a high
+            average here points at the loom, not the yarn.</div></div></div>
+      </div>`;
+    }
+
+    page.querySelector("#new").onclick = inspectModal;
+    page.querySelectorAll(".tab").forEach(b => b.onclick = () => { tab = b.dataset.tab; render(); });
+  }
+  render();
+})();
+</script>
+</body></html>

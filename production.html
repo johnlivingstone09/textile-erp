@@ -1,0 +1,236 @@
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Production · LoomLine Textile ERP</title>
+<meta name="theme-color" content="#141733">
+<script>try{document.documentElement.setAttribute("data-theme",localStorage.getItem("loomline.theme")||"light")}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Sora:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="erp-styles.css">
+</head><body>
+<script src="erp-data.js"></script><script src="erp-core.js"></script>
+
+<script>
+(function(){
+  const db = ERP.db;
+  const page = ERP.shell({ title:"Production", crumb:"Make", page:"production.html", module:"production" });
+  if(!page) return;
+  let tab = "orders", q = ERP.param("q") || "";
+
+  /* yarn needed = metres × GSM × width(m) ÷ 1000 × (1 + waste) */
+  function yarnNeeded(fabric, metres){
+    const widthM = fabric.width * 0.0254;
+    const kg = (metres * fabric.gsm * widthM) / 1000;
+    return { net: kg, gross: kg * 1.05 };
+  }
+
+  function planModal(){
+    const openSO = db.salesOrders.filter(o => o.status !== "Completed");
+    const fields = [
+      { name:"so", label:"Against sales order", type:"select", required:true,
+        options: openSO.map(o => ({ value:o.id, label:o.id + " — " + ERP.nameOf(db.customers,o.customer) })) },
+      { name:"qty", label:"Quantity to make (m)", type:"number", required:true, min:1 },
+      { name:"start", label:"Start date", type:"date", value: ERP.today(), required:true },
+      { name:"due", label:"Finish by", type:"date", required:true },
+      { name:"machine", label:"Machine", type:"select",
+        options: db.machines.filter(m => m.id.startsWith("L")).map(m => ({ value:m.id, label:m.name + " — " + m.type })) },
+      { name:"yarnLot", label:"Yarn lot", type:"select",
+        options: db.yarn.map(y => ({ value:y.id, label:y.id + " — " + y.count + " " + y.type + " (" + ERP.num(y.kgIn - y.kgUsed) + " kg free)" })) }
+    ];
+    const m = ERP.modal({
+      title:"Plan a production order", wide:true, okText:"Create production order",
+      body: ERP.form(fields) + `<div id="bom" style="margin-top:16px"></div>`,
+      onOk(scope){
+        const v = ERP.readForm(scope, fields);
+        if(!v) return false;
+        const so = ERP.by(db.salesOrders, v.so);
+        const id = ERP.nextId(db.prodOrders, "PO-", 5);
+        db.prodOrders.unshift({ id, so:so.id, fabric:so.fabric, qty:Number(v.qty), made:0,
+          start:v.start, due:v.due, machines:[v.machine], yarnLot:v.yarnLot, status:"Planned" });
+        if(so.status === "Draft" || so.status === "Confirmed") so.status = "In production";
+        ERP.save(); ERP.toast("Created " + id + " and moved " + so.id + " into production."); render();
+      }
+    });
+    function refreshBom(){
+      const so = ERP.by(db.salesOrders, m.el.querySelector('[name="so"]').value);
+      const qty = Number(m.el.querySelector('[name="qty"]').value) || 0;
+      const f = ERP.by(db.fabrics, so.fabric);
+      const need = yarnNeeded(f, qty);
+      const lot = ERP.by(db.yarn, m.el.querySelector('[name="yarnLot"]').value);
+      const free = lot ? lot.kgIn - lot.kgUsed : 0;
+      m.el.querySelector("#bom").innerHTML = `
+        <h4 style="margin-bottom:8px">What this order will consume</h4>
+        ${ERP.table([
+          { h:"Item", render:r => r[0] },
+          { h:"Quantity", cls:"num", render:r => r[1] }
+        ], [
+          ["Fabric", ERP.esc(f.name) + " · " + f.gsm + " GSM · " + f.width + '"'],
+          ["Yarn, net", ERP.dec(need.net) + " kg"],
+          ["Yarn with 5% waste", "<b>" + ERP.dec(need.gross) + " kg</b>"],
+          ["Sizing chemicals", ERP.dec(need.gross * 0.08) + " kg"],
+          ["Packing", Math.ceil(qty / 120) + " rolls, " + Math.ceil(qty / 120) + " bags"]
+        ])}
+        ${lot ? (free >= need.gross
+          ? `<div class="note" style="margin-top:12px">Lot ${lot.id} has ${ERP.num(free)} kg free — enough, with ${ERP.dec(free - need.gross)} kg left over.</div>`
+          : `<div class="note red" style="margin-top:12px">Lot ${lot.id} is short by ${ERP.dec(need.gross - free)} kg. Pick another lot or raise a purchase order.</div>`) : ""}`;
+    }
+    m.el.querySelectorAll('[name="so"],[name="qty"],[name="yarnLot"]').forEach(el => el.addEventListener("input", refreshBom));
+    const soSel = m.el.querySelector('[name="so"]');
+    soSel.addEventListener("change", () => {
+      const so = ERP.by(db.salesOrders, soSel.value);
+      m.el.querySelector('[name="qty"]').value = so.qty - so.produced;
+      m.el.querySelector('[name="due"]').value = so.due;
+      refreshBom();
+    });
+    soSel.dispatchEvent(new Event("change"));
+  }
+
+  function entryModal(){
+    const fields = [
+      { name:"date", label:"Date", type:"date", value: ERP.today(), required:true },
+      { name:"po", label:"Production order", type:"select", required:true,
+        options: db.prodOrders.filter(p => p.status !== "Completed").map(p => ({ value:p.id, label:p.id + " — " + ERP.nameOf(db.fabrics,p.fabric) })) },
+      { name:"machine", label:"Machine", type:"select",
+        options: db.machines.filter(m => m.id.startsWith("L")).map(m => ({ value:m.id, label:m.name })) },
+      { name:"shift", label:"Shift", type:"select", options:["A","B","C"] },
+      { name:"metres", label:"Metres produced", type:"number", required:true, min:0 },
+      { name:"downtime", label:"Downtime (minutes)", type:"number", value:0, min:0 },
+      { name:"operator", label:"Operator", type:"select", options: db.employees.filter(e => e.dept === "Weaving").map(e => e.name) }
+    ];
+    ERP.modal({
+      title:"Record production", okText:"Save entry", body: ERP.form(fields),
+      onOk(scope){
+        const v = ERP.readForm(scope, fields);
+        if(!v) return false;
+        const id = ERP.nextId(db.prodEntries, "PE-", 4);
+        db.prodEntries.unshift({ id, date:v.date, po:v.po, machine:v.machine, shift:v.shift,
+          metres:Number(v.metres), operator:v.operator, downtime:Number(v.downtime) });
+        const po = ERP.by(db.prodOrders, v.po);
+        po.made += Number(v.metres);
+        if(po.status === "Planned") po.status = "Running";
+        if(po.made >= po.qty) po.status = "Completed";
+        const so = ERP.by(db.salesOrders, po.so);
+        if(so) so.produced = Math.min(so.qty, so.produced + Number(v.metres));
+        const mc = ERP.by(db.machines, v.machine);
+        if(mc){ mc.actual = Number(v.metres); mc.downtime = Number(v.downtime); }
+        ERP.save(); ERP.toast(ERP.num(v.metres) + " m posted to " + v.po + "."); render();
+      }
+    });
+  }
+
+  const poAct = ERP.actions({
+    list:"prodOrders", title:"Production order",
+    fields:[
+      { name:"qty", label:"Quantity to make (m)", type:"number", required:true, min:1 },
+      { name:"start", label:"Start date", type:"date" },
+      { name:"due", label:"Finish by", type:"date" },
+      { name:"yarnLot", label:"Yarn lot", type:"select", options: db.yarn.map(y => ({ value:y.id, label:y.id + " — " + y.count })) },
+      { name:"status", label:"Status", type:"select", options:["Planned","Running","On hold","Completed"] }
+    ],
+    validate:(rec,v) => Number(v.qty) < rec.made ? "Only " + ERP.num(rec.made) + " m has been woven; the order cannot be smaller than that." : null,
+    canDelete: r => r.made > 0 ? "Fabric has already been woven on this order." : null,
+    after: () => render()
+  });
+  const peAct = ERP.actions({
+    list:"prodEntries", title:"Entry",
+    fields:[
+      { name:"date", label:"Date", type:"date", required:true },
+      { name:"machine", label:"Machine", type:"select", options: db.machines.filter(m => m.id.startsWith("L")).map(m => ({ value:m.id, label:m.name })) },
+      { name:"shift", label:"Shift", type:"select", options:["A","B","C"] },
+      { name:"metres", label:"Metres", type:"number", required:true, min:0 },
+      { name:"downtime", label:"Downtime (minutes)", type:"number", min:0 },
+      { name:"operator", label:"Operator", type:"text" }
+    ],
+    deleteNote:"The production order and the sales order will be re-totalled from the remaining entries.",
+    onSave(rec){
+      const po = ERP.by(db.prodOrders, rec.po);
+      if(po){ po.made = db.prodEntries.filter(e => e.po === po.id).reduce((s,e) => s + Number(e.metres), 0);
+        const so = ERP.by(db.salesOrders, po.so);
+        if(so) so.produced = Math.min(so.qty, db.prodOrders.filter(x => x.so === so.id).reduce((s,x) => s + x.made, 0));
+        ERP.save(); }
+    },
+    after: () => {
+      db.prodOrders.forEach(po => {
+        po.made = db.prodEntries.filter(e => e.po === po.id).reduce((s,e) => s + Number(e.metres), 0);
+      });
+      db.salesOrders.forEach(so => {
+        so.produced = Math.min(so.qty, db.prodOrders.filter(x => x.so === so.id).reduce((s,x) => s + x.made, 0));
+      });
+      ERP.save(); render();
+    }
+  });
+
+  function render(){
+    const s = q.toUpperCase();
+    const orders = db.prodOrders.filter(p => !s || p.id.toUpperCase().includes(s) || p.so.toUpperCase().includes(s));
+    const running = db.prodOrders.filter(p => p.status === "Running");
+    const wip = running.reduce((t,p) => t + (p.qty - p.made), 0);
+
+    page.innerHTML = `
+      <div class="page-head">
+        <div class="ph-txt"><h2>Production orders</h2>
+          <p>${running.length} running · ${ERP.num(wip)} m still to weave</p></div>
+        <button class="btn" id="entry">Record production</button>
+        <button class="btn btn-primary" id="plan">Plan an order</button>
+      </div>
+      <div class="tabs">
+        <button class="tab ${tab==="orders"?"is-on":""}" data-tab="orders">Orders</button>
+        <button class="tab ${tab==="entries"?"is-on":""}" data-tab="entries">Daily entries</button>
+        <button class="tab ${tab==="load"?"is-on":""}" data-tab="load">Machine load</button>
+      </div>
+      <div class="card" id="body"></div>`;
+
+    const body = page.querySelector("#body");
+    if(tab === "orders"){
+      body.innerHTML = ERP.table([
+        { h:"Order", key:"id", cls:"mono strong" },
+        { h:"Sales order", render:p => `<a class="mono" href="sales.html?q=${p.so}">${p.so}</a>` },
+        { h:"Fabric", render:p => ERP.esc(ERP.nameOf(db.fabrics,p.fabric)) },
+        { h:"Planned", cls:"num", render:p => ERP.num(p.qty) },
+        { h:"Made", cls:"num", render:p => ERP.num(p.made) },
+        { h:"Progress", render:p => ERP.bar((p.made/p.qty)*100, p.made>=p.qty?"ok":"") },
+        { h:"Machines", render:p => `<span class="mono">${ERP.esc(p.machines.join(", "))}</span>` },
+        { h:"Yarn lot", render:p => `<a class="mono" href="inventory.html?tab=yarn&q=${p.yarnLot}">${p.yarnLot}</a>` },
+        { h:"Finish by", render:p => ERP.date(p.due) },
+        { h:"Status", render:p => ERP.statusBadge(p.status) },
+        poAct.col
+      ], orders);
+      poAct.wire(body);
+    }
+    if(tab === "entries"){
+      body.innerHTML = ERP.table([
+        { h:"Entry", key:"id", cls:"mono" },
+        { h:"Date", render:e => ERP.date(e.date) },
+        { h:"Order", key:"po", cls:"mono" },
+        { h:"Machine", render:e => ERP.esc(ERP.nameOf(db.machines,e.machine)) },
+        { h:"Shift", key:"shift" },
+        { h:"Metres", cls:"num", render:e => ERP.num(e.metres) },
+        { h:"Downtime", cls:"num", render:e => e.downtime + " min" },
+        { h:"Operator", key:"operator" },
+        peAct.col
+      ], db.prodEntries);
+      peAct.wire(body);
+    }
+    if(tab === "load"){
+      const load = db.machines.filter(m => m.id.startsWith("L")).map(m => {
+        const jobs = db.prodOrders.filter(p => p.machines.includes(m.id) && p.status !== "Completed");
+        const metres = jobs.reduce((t,p) => t + (p.qty - p.made), 0);
+        return { m, jobs, metres, days: Math.ceil(metres / (m.target || 900)) };
+      });
+      body.innerHTML = ERP.table([
+        { h:"Machine", render:r => ERP.esc(r.m.name) + " · " + ERP.esc(r.m.type) },
+        { h:"Status", render:r => ERP.statusBadge(r.m.status) },
+        { h:"Orders queued", cls:"num", render:r => r.jobs.length },
+        { h:"Metres queued", cls:"num", render:r => ERP.num(r.metres) },
+        { h:"Days of work", cls:"num", render:r => r.days || "—" },
+        { h:"Booked till", render:r => r.days ? ERP.date(new Date(Date.now() + r.days*86400000).toISOString().slice(0,10)) : "Free" }
+      ], load);
+    }
+
+    page.querySelector("#plan").onclick = planModal;
+    page.querySelector("#entry").onclick = entryModal;
+    page.querySelectorAll(".tab").forEach(b => b.onclick = () => { tab = b.dataset.tab; render(); });
+  }
+  render();
+})();
+</script>
+</body></html>

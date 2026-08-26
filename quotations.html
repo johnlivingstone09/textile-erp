@@ -1,0 +1,162 @@
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quotations · LoomLine Textile ERP</title>
+<meta name="theme-color" content="#141733">
+<script>try{document.documentElement.setAttribute("data-theme",localStorage.getItem("loomline.theme")||"light")}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Sora:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="erp-styles.css">
+</head><body>
+<script src="erp-data.js"></script><script src="erp-core.js"></script>
+<script>
+(function(){
+  const db = ERP.db;
+  const page = ERP.shell({ title:"Quotations", crumb:"Sell", page:"quotations.html", module:"quotations" });
+  if(!page) return;
+  let q = "";
+
+  const headFields = q => ([
+    { name:"date",     label:"Date", type:"date", required:true },
+    { name:"customer", label:"Customer", type:"select", required:true,
+      options: db.customers.map(c => ({ value:c.id, label:c.name + " — " + c.city })) },
+    { name:"gstMode",  label:"Tax", type:"select", options:[
+        { value:"gst",  label:"With GST — tax invoice basis" },
+        { value:"none", label:"Without GST — bill of supply basis" }] },
+    { name:"gstRate",  label:"GST rate (%)", type:"select", options:["0","5","12","18","28"] },
+    { name:"validity", label:"Valid till", type:"date" },
+    { name:"delivery", label:"Delivery", type:"text" },
+    { name:"transport",label:"Transport", type:"text" },
+    { name:"discount", label:"Discount (₹)", type:"number", value:0 },
+    { name:"freight",  label:"Freight / packing (₹)", type:"number", value:0 },
+    { name:"status",   label:"Status", type:"select", options:["Draft","Sent","Under discussion","Accepted","Lost"] },
+    { name:"notes",    label:"Note printed on the quotation", type:"textarea", full:true, rows:2 }
+  ]);
+
+  function editor(rec){
+    const isNew = !rec;
+    const base = rec || { date: ERP.today(), customer: db.customers[0].id, gstMode:"gst", gstRate:5,
+      validity: new Date(Date.now()+30*864e5).toISOString().slice(0,10), delivery:"30 days from confirmed order",
+      transport:"Ex-works Trichy", discount:0, freight:0, status:"Draft", notes:"",
+      items:[{ desc:"", hsn:"5208", qty:"", unit:"m", rate:"" }] };
+    const fields = headFields();
+    const m = ERP.modal({
+      title:(isNew ? "New quotation" : "Edit " + rec.id), wide:true, okText: isNew ? "Create quotation" : "Save changes",
+      body: ERP.form(fields, base) +
+        `<h4 style="margin:20px 0 9px">Lines</h4>${ERP.lineItems.html(base.items)}
+         <div class="grid g-2" style="margin-top:16px"><div></div><div id="tot"></div></div>`,
+      onOk(scope){
+        const v = ERP.readForm(scope, fields);
+        if(!v) return false;
+        const items = ERP.lineItems.read(scope);
+        if(!items.length){ ERP.toast("Add at least one line with a description and a quantity.", true); return false; }
+        const doc = Object.assign({}, base, v, { items, gstRate: Number(v.gstRate),
+          discount:Number(v.discount), freight:Number(v.freight) });
+        if(doc.gstMode === "none") doc.gstRate = 0;
+        if(isNew){ doc.id = ERP.nextId(db.quotations, "QT-", 4); db.quotations.unshift(doc); }
+        else Object.assign(rec, doc);
+        ERP.save(); ERP.toast((isNew ? "Quotation " + doc.id + " created." : rec.id + " updated.")); render();
+      }
+    });
+    const live = () => {
+      const v = {};
+      ["gstMode","gstRate","discount","freight","customer"].forEach(n => {
+        const el = m.el.querySelector(`[name="${n}"]`); if(el) v[n] = el.value;
+      });
+      m.el.querySelector("#tot").innerHTML = ERP.totalsBlock({
+        items: ERP.lineItems.read(m.el), gstMode:v.gstMode, gstRate:Number(v.gstRate),
+        discount:Number(v.discount), freight:Number(v.freight), customer:v.customer });
+      const rateField = m.el.querySelector('[data-field="gstRate"]');
+      rateField.style.opacity = v.gstMode === "gst" ? "1" : ".4";
+      m.el.querySelector('[name="gstRate"]').disabled = v.gstMode !== "gst";
+    };
+    ERP.lineItems.wire(m.el, live);
+    m.el.querySelectorAll('[name="gstMode"],[name="gstRate"],[name="discount"],[name="freight"],[name="customer"]')
+      .forEach(el => el.addEventListener("input", live));
+    live();
+  }
+
+  function convert(qt){
+    const t = ERP.docTotals(qt);
+    ERP.confirm({
+      title:"Turn " + qt.id + " into a sales order?",
+      body:`${ERP.esc(ERP.nameOf(db.customers, qt.customer))} · ${ERP.num(qt.items.reduce((s,i)=>s+i.qty,0))} m ·
+        ${ERP.money(t.grand)}. A confirmed order will be created and this quotation marked accepted.`,
+      okText:"Create the order",
+      onOk(){
+        const first = qt.items[0];
+        const fab = db.fabrics.find(f => first.desc.toLowerCase().indexOf(f.name.toLowerCase()) > -1) || db.fabrics[0];
+        const id = ERP.nextId(db.salesOrders, "SO-", 4);
+        db.salesOrders.unshift({ id, date: ERP.today(), customer:qt.customer, fabric:fab.id,
+          qty:first.qty, rate:first.rate, due: qt.validity || ERP.today(), produced:0, passed:0, packed:0,
+          dispatched:0, status:"Confirmed", notes:"From quotation " + qt.id, quotation:qt.id });
+        qt.status = "Accepted";
+        ERP.save(); ERP.toast("Order " + id + " created from " + qt.id + "."); render();
+      }
+    });
+  }
+
+  const act = ERP.actions({
+    list:"quotations", title:"Quotation", fields: headFields(), editor: editor,
+    canDelete: r => r.status === "Accepted" ? "This quotation has been turned into an order." : null,
+    after: render
+  });
+
+  function render(){
+    const s = q.toUpperCase();
+    const rows = db.quotations.filter(r => !s || r.id.toUpperCase().includes(s) ||
+      ERP.nameOf(db.customers, r.customer).toUpperCase().includes(s));
+    const value = db.quotations.reduce((t,r) => t + ERP.docTotals(r).grand, 0);
+    const live = db.quotations.filter(r => r.status === "Sent" || r.status === "Under discussion");
+    const won = db.quotations.filter(r => r.status === "Accepted");
+
+    page.innerHTML = `
+      <div class="page-head">
+        <div class="ph-txt"><h2>Quotations</h2>
+          <p>Quote with GST or without it, print it, send it, and turn the accepted ones into orders
+             without typing anything twice.</p></div>
+        <button class="btn btn-primary" id="new">New quotation</button>
+      </div>
+      ${ERP.kpis([
+        { label:"Quotations", value: db.quotations.length, note: live.length + " awaiting a reply" },
+        { label:"Value quoted", value: ERP.crore(value), tone:"sky" },
+        { label:"Accepted", value: won.length, note: db.quotations.length ? ERP.dec((won.length/db.quotations.length)*100,0) + "% conversion" : "—", tone:"teal" },
+        { label:"Without GST", value: db.quotations.filter(r => r.gstMode === "none").length, note:"Bill of supply basis", tone:"amber" }
+      ])}
+      <div class="filters"><input id="q" type="search" placeholder="Search quotation or customer" value="${ERP.esc(q)}"></div>
+      <div class="card" id="body"></div>`;
+
+    const body = page.querySelector("#body");
+    const cols = [
+      { h:"Quotation", key:"id", cls:"mono strong" },
+      { h:"Date", render:r => ERP.date(r.date) },
+      { h:"Customer", render:r => ERP.esc(ERP.nameOf(db.customers, r.customer)) },
+      { h:"Lines", cls:"num", render:r => r.items.length },
+      { h:"Quantity", cls:"num", render:r => ERP.num(r.items.reduce((s,i)=>s+i.qty,0)) + " m" },
+      { h:"Tax", render:r => r.gstMode === "gst" ? ERP.badge("GST " + r.gstRate + "%","violet") : ERP.badge("No GST","grey") },
+      { h:"Value", cls:"num", render:r => `<b>${ERP.money(ERP.docTotals(r).grand)}</b>` },
+      { h:"Valid till", render:r => ERP.date(r.validity) },
+      { h:"Status", render:r => ERP.statusBadge(r.status) },
+      { h:"", cls:"num", render:r => `<span class="row-act">
+          <button class="btn btn-sm" data-print="${r.id}">Print</button>
+          ${r.status !== "Accepted" ? `<button class="btn btn-sm" data-conv="${r.id}">To order</button>` : ""}
+          </span>` },
+      act.col
+    ];
+    body.innerHTML = ERP.table(cols, rows, { emptyTitle:"No quotations yet",
+      emptyText:"Raise one and it prints as a proper document." });
+    act.wire(body);
+    body.querySelectorAll("[data-print]").forEach(b => b.onclick = () =>
+      ERP.printDoc("quotation", ERP.by(db.quotations, b.dataset.print)));
+    body.querySelectorAll("[data-conv]").forEach(b => b.onclick = () =>
+      convert(ERP.by(db.quotations, b.dataset.conv)));
+
+    page.querySelector("#new").onclick = () => editor(null);
+    const qi = page.querySelector("#q");
+    qi.oninput = () => { q = qi.value; const p = qi.selectionStart; render();
+      const n = page.querySelector("#q"); n.focus(); n.setSelectionRange(p,p); };
+  }
+
+  render();
+})();
+</script>
+</body></html>

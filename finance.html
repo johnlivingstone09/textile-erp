@@ -1,0 +1,165 @@
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Finance · LoomLine Textile ERP</title>
+<meta name="theme-color" content="#141733">
+<script>try{document.documentElement.setAttribute("data-theme",localStorage.getItem("loomline.theme")||"light")}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Sora:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="erp-styles.css">
+</head><body>
+<script src="erp-data.js"></script><script src="erp-core.js"></script>
+<script>
+(function(){
+  const db = ERP.db;
+  const page = ERP.shell({ title:"Finance", crumb:"Sell", page:"finance.html", module:"finance" });
+  if(!page) return;
+  let tab = "pl";
+  const total = i => ERP.docTotals(i).grand;
+
+  const exFields = [
+    { name:"date",  label:"Date", type:"date", value: ERP.today(), required:true },
+    { name:"head",  label:"Head", type:"select", options:["Power","Wages","Transport","Maintenance","Job work","Water","Rent","Interest","Office","Other"] },
+    { name:"note",  label:"Narration", type:"text", required:true, full:true },
+    { name:"amount",label:"Amount (₹)", type:"number", required:true, min:1 },
+    { name:"mode",  label:"Paid by", type:"select", options:["NEFT","RTGS","UPI","Cheque","Cash"] }
+  ];
+  const exp = ERP.crud({
+    list:"expenses", prefix:"EX-", width:4, title:"Expense", fields:exFields,
+    cols:[
+      { h:"Voucher", key:"id", cls:"mono" },
+      { h:"Date", render:e => ERP.date(e.date) },
+      { h:"Head", render:e => ERP.badge(e.head, "violet") },
+      { h:"Narration", key:"note", cls:"strong" },
+      { h:"Amount", cls:"num", render:e => ERP.money(e.amount) },
+      { h:"Mode", key:"mode" }
+    ],
+    after: render
+  });
+
+  function render(){
+    const sales = db.invoices.reduce((s,i) => s + ERP.docTotals(i).taxable, 0);
+    const gst = db.invoices.reduce((s,i) => s + ERP.docTotals(i).tax, 0);
+    const spend = db.expenses.reduce((s,e) => s + e.amount, 0);
+    const purchase = db.purchaseOrders.filter(p => p.status === "Received").reduce((s,p) => s + p.qty*p.rate, 0);
+    const profit = sales - spend - purchase;
+    const receivable = db.customers.reduce((s,c) => s + c.outstanding, 0);
+    const payable = db.suppliers.reduce((s,x) => s + x.payable, 0);
+    const byHead = {};
+    db.expenses.forEach(e => byHead[e.head] = (byHead[e.head] || 0) + e.amount);
+    const colors = ["#5B4BF5","#0FB89B","#E38E07","#E23A63","#2A7FE0","#7A6BFF","#3FD9BC","#F5B84E"];
+
+    page.innerHTML = `
+      <div class="page-head">
+        <div class="ph-txt"><h2>Finance</h2>
+          <p>What came in, what went out, what the fabric actually costs to make, and the GST position.</p></div>
+        <button class="btn" onclick="window.print()">Print</button>
+        <button class="btn btn-primary" id="add">Book an expense</button>
+      </div>
+      ${ERP.kpis([
+        { label:"Sales booked", value: ERP.crore(sales), note:"Excluding GST" },
+        { label:"Material bought", value: ERP.crore(purchase), tone:"sky" },
+        { label:"Expenses", value: ERP.crore(spend), tone:"amber" },
+        { label:"Gross position", value: ERP.crore(profit), tone: profit > 0 ? "teal" : "rose" },
+        { label:"Receivable", value: ERP.crore(receivable), note:"Payable " + ERP.crore(payable), tone:"rose" }
+      ])}
+      <div class="tabs">
+        <button class="tab ${tab==="pl"?"is-on":""}" data-tab="pl">Profit & loss</button>
+        <button class="tab ${tab==="exp"?"is-on":""}" data-tab="exp">Expenses</button>
+        <button class="tab ${tab==="cost"?"is-on":""}" data-tab="cost">Cost per metre</button>
+        <button class="tab ${tab==="gst"?"is-on":""}" data-tab="gst">GST</button>
+      </div>
+      <div id="body"></div>`;
+
+    const body = page.querySelector("#body");
+    if(tab === "pl"){
+      const rows = [
+        ["Sales (taxable)", sales, "in"],
+        ["Material purchased", -purchase, "out"],
+        ["Job work and processing", -db.jobWorks.reduce((s,j)=>s+j.recdKg*j.rate,0), "out"],
+        ["Direct expenses", -spend, "out"],
+        ["Gross position", profit, "net"]
+      ];
+      body.innerHTML = `<div class="grid g-21">
+        <div class="card"><div class="card-head"><h3>Position · August 2026</h3></div>
+        ${ERP.table([
+          { h:"Head", render:r => r[2] === "net" ? `<b>${ERP.esc(r[0])}</b>` : ERP.esc(r[0]) },
+          { h:"Amount", cls:"num", render:r => `<span style="color:${r[1] < 0 ? "var(--rose)" : r[2] === "net" ? "var(--ink)" : "var(--teal)"}">
+              ${ERP.money(Math.abs(r[1]))}${r[1] < 0 ? " out" : ""}</span>` }
+        ], rows)}
+        <div class="card-body"><div class="note ${profit > 0 ? "good" : "red"}">
+          ${profit > 0 ? "Positive" : "Negative"} by ${ERP.crore(Math.abs(profit))} before depreciation,
+          interest and tax. Stock movement is not netted here.</div></div></div>
+        <div class="card"><div class="card-head"><h3>Where the money went</h3></div>
+          <div class="card-body">${ERP.donut(Object.entries(byHead).map(([l,v],i) =>
+            ({ l, v, color: colors[i % colors.length] })), { money:true })}</div></div>
+      </div>`;
+    }
+    if(tab === "exp"){ body.innerHTML = `<div class="card">${exp.html()}</div>`; exp.wire(body); }
+    if(tab === "cost"){
+      const heads = db.costHeads;
+      const cost = heads.reduce((s,h) => s + h.perMetre, 0);
+      const avgRate = db.salesOrders.reduce((s,o) => s + o.rate*o.qty, 0) / db.salesOrders.reduce((s,o) => s + o.qty, 0);
+      body.innerHTML = `<div class="card"><div class="card-head"><h3>Cost build-up per metre</h3>
+        <span class="card-sub">standard costing, poplin 40×40</span></div>
+        ${ERP.table([
+          { h:"Head", render:h => ERP.esc(h.head), cls:"strong" },
+          { h:"₹ per metre", cls:"num", render:h => ERP.dec(h.perMetre, 2) },
+          { h:"Share", render:h => ERP.bar((h.perMetre/cost)*100) }
+        ], heads, { foot:{} })}
+        <div class="card-body">
+          <dl class="def">
+            <div><dt>Total cost</dt><dd>₹${ERP.dec(cost,2)} / m</dd></div>
+            <div><dt>Average selling rate</dt><dd>₹${ERP.dec(avgRate,2)} / m</dd></div>
+            <div><dt>Margin per metre</dt><dd>₹${ERP.dec(avgRate-cost,2)}</dd></div>
+            <div><dt>Margin</dt><dd>${ERP.dec(((avgRate-cost)/avgRate)*100)}%</dd></div>
+          </dl>
+          <div class="note violet" style="margin-top:14px">Yarn is ${ERP.dec((heads[0].perMetre/cost)*100)}% of the
+            cost. A one rupee move in yarn rate matters more than every overhead line put together.</div>
+        </div></div>`;
+    }
+    if(tab === "gst"){
+      const outward = db.invoices.filter(i => i.gstMode === 'gst').map(i => ({ i, tax: ERP.docTotals(i).tax, t: ERP.docTotals(i) }));
+      const inward = db.purchaseOrders.filter(p => p.status === "Received")
+        .map(p => ({ p, tax: p.qty*p.rate*0.05 }));
+      const outTax = outward.reduce((s,x) => s + x.tax, 0);
+      const inTax = inward.reduce((s,x) => s + x.tax, 0);
+      body.innerHTML = `<div class="grid g-2">
+        <div class="card"><div class="card-head"><h3>Outward · GSTR-1</h3></div>
+          ${ERP.table([
+            { h:"Invoice", render:x => x.i.id, cls:"mono" },
+            { h:"Customer", render:x => ERP.esc(ERP.nameOf(db.customers, x.i.customer)) },
+            { h:"Taxable", cls:"num", render:x => ERP.money(x.t.taxable) },
+            { h:"Rate", cls:"num", render:x => x.i.gstRate + "%" },
+            { h:"CGST", cls:"num", render:x => x.t.cgst ? ERP.money(x.t.cgst) : "—" },
+            { h:"SGST", cls:"num", render:x => x.t.sgst ? ERP.money(x.t.sgst) : "—" },
+            { h:"IGST", cls:"num", render:x => x.t.igst ? ERP.money(x.t.igst) : "—" },
+            { h:"Total tax", cls:"num", render:x => ERP.money(x.tax) }
+          ], outward, { foot:{} })}</div>
+        <div class="card"><div class="card-head"><h3>Inward · input credit</h3></div>
+          ${ERP.table([
+            { h:"Order", render:x => x.p.id, cls:"mono" },
+            { h:"Supplier", render:x => ERP.esc(ERP.nameOf(db.suppliers, x.p.supplier)) },
+            { h:"Taxable", cls:"num", render:x => ERP.money(x.p.qty*x.p.rate) },
+            { h:"Tax", cls:"num", render:x => ERP.money(x.tax) }
+          ], inward, { foot:{} })}</div>
+      </div>
+      <div class="card" style="margin-top:18px"><div class="card-body">
+        <dl class="def">
+          <div><dt>Output tax</dt><dd>${ERP.money(outTax)}</dd></div>
+          <div><dt>Input credit</dt><dd>${ERP.money(inTax)}</dd></div>
+          <div><dt>Net payable</dt><dd>${ERP.money(Math.max(0, outTax - inTax))}</dd></div>
+          <div><dt>Credit carried</dt><dd>${ERP.money(Math.max(0, inTax - outTax))}</dd></div>
+        </dl>
+        <div class="note" style="margin-top:14px">Working figures only — reconcile against the portal before filing.
+          Bills of supply carry no tax and are excluded from the outward table
+          (${db.invoices.filter(i => i.gstMode !== "gst").length} document(s) this period).</div>
+      </div></div>`;
+    }
+
+    page.querySelector("#add").onclick = () => exp.editor();
+    page.querySelectorAll(".tab").forEach(b => b.onclick = () => { tab = b.dataset.tab; render(); });
+  }
+  render();
+})();
+</script>
+</body></html>

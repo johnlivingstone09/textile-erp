@@ -1,0 +1,176 @@
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dyeing · LoomLine Textile ERP</title>
+<meta name="theme-color" content="#141733">
+<script>try{document.documentElement.setAttribute("data-theme",localStorage.getItem("loomline.theme")||"light")}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Sora:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="erp-styles.css">
+</head><body>
+<script src="erp-data.js"></script><script src="erp-core.js"></script>
+
+<script>
+(function(){
+  const db = ERP.db;
+  const page = ERP.shell({ title:"Dyeing", crumb:"Make", page:"dyeing.html", module:"dyeing" });
+  if(!page) return;
+  let tab = "batches";
+
+  function batchModal(){
+    const fields = [
+      { name:"date", label:"Date", type:"date", value: ERP.today(), required:true },
+      { name:"fabric", label:"Fabric", type:"select", required:true,
+        options: db.fabrics.map(f => ({ value:f.id, label:f.name })) },
+      { name:"kg", label:"Weight (kg)", type:"number", required:true, min:1 },
+      { name:"recipe", label:"Recipe", type:"select",
+        options: db.recipes.map(r => ({ value:r.id, label:r.shade + " · rev " + r.rev })) },
+      { name:"machine", label:"Machine", type:"select",
+        options: db.machines.filter(m => m.id.startsWith("D")).map(m => ({ value:m.id, label:m.name })) },
+      { name:"operator", label:"Operator", type:"select", options: db.employees.filter(e => e.dept === "Processing").map(e => e.name) }
+    ];
+    const m = ERP.modal({
+      title:"New dyeing batch", wide:true, okText:"Start batch",
+      body: ERP.form(fields) + `<div id="chem" style="margin-top:16px"></div>`,
+      onOk(scope){
+        const v = ERP.readForm(scope, fields);
+        if(!v) return false;
+        const rc = ERP.by(db.recipes, v.recipe);
+        const id = ERP.nextId(db.dyeBatches, "DB-", 5);
+        db.dyeBatches.unshift({ id, date:v.date, fabric:v.fabric, kg:Number(v.kg), shade:rc.shade,
+          recipe:rc.id, machine:v.machine, temp:rc.temp, mins:rc.mins,
+          water:Number(v.kg)*20, operator:v.operator, status:"Running", loss:0 });
+        ERP.save(); ERP.toast("Batch " + id + " started on " + ERP.nameOf(db.machines, v.machine) + "."); render();
+      }
+    });
+    function refresh(){
+      const rc = ERP.by(db.recipes, m.el.querySelector('[name="recipe"]').value);
+      const kg = Number(m.el.querySelector('[name="kg"]').value) || 0;
+      const liq = kg * 8;
+      m.el.querySelector("#chem").innerHTML = `
+        <h4 style="margin-bottom:8px">Chemicals to issue — ${ERP.esc(rc.shade)}, rev ${rc.rev}</h4>
+        <p style="font-size:.83rem;color:var(--muted)">Liquor ratio 1:8 → ${ERP.num(liq)} litres · ${rc.temp}°C for ${rc.mins} minutes</p>
+        ${ERP.table([
+          { h:"Chemical", render:r => ERP.esc(r.n) },
+          { h:"Recipe", render:r => r.q },
+          { h:"To issue", cls:"num", render:r => {
+            if(r.q.includes("g/l")) return ERP.dec(parseFloat(r.q) * liq / 1000, 2) + " kg";
+            return ERP.dec(parseFloat(r.q) * kg / 100, 2) + " kg";
+          } }
+        ], rc.items)}`;
+    }
+    m.el.querySelectorAll('[name="recipe"],[name="kg"]').forEach(e => e.addEventListener("input", refresh));
+    refresh();
+  }
+
+  function closeBatch(b){
+    const fields = [
+      { name:"outKg", label:"Weight returned (kg)", type:"number", value: ERP.dec(b.kg*0.97,1), required:true },
+      { name:"water", label:"Water used (litres)", type:"number", value: b.water || b.kg*20 },
+      { name:"shadeOk", label:"Shade against standard", type:"select", options:["Matching","Slight variation","Reprocess"] }
+    ];
+    ERP.modal({
+      title:"Close batch " + b.id, okText:"Close batch", body: ERP.form(fields),
+      onOk(scope){
+        const v = ERP.readForm(scope, fields);
+        if(!v) return false;
+        b.status = v.shadeOk === "Reprocess" ? "Reprocess" : "Completed";
+        b.loss = ((b.kg - Number(v.outKg)) / b.kg) * 100;
+        b.water = Number(v.water);
+        ERP.save(); ERP.toast("Batch " + b.id + " closed with " + ERP.dec(b.loss) + "% loss."); render();
+      }
+    });
+  }
+
+  const dbAct = ERP.actions({
+    list:"dyeBatches", title:"Batch",
+    fields:[
+      { name:"date", label:"Date", type:"date", required:true },
+      { name:"fabric", label:"Fabric", type:"select", options: db.fabrics.map(f => ({ value:f.id, label:f.name })) },
+      { name:"kg", label:"Weight (kg)", type:"number", required:true },
+      { name:"shade", label:"Shade", type:"text" },
+      { name:"recipe", label:"Recipe", type:"select", options: db.recipes.map(r => ({ value:r.id, label:r.shade + " rev " + r.rev })) },
+      { name:"machine", label:"Machine", type:"select", options: db.machines.filter(m => m.id.startsWith("D")).map(m => ({ value:m.id, label:m.name })) },
+      { name:"temp", label:"Temperature (°C)", type:"number" },
+      { name:"mins", label:"Cycle (minutes)", type:"number" },
+      { name:"water", label:"Water used (litres)", type:"number" },
+      { name:"status", label:"Status", type:"select", options:["Planned","Running","Completed","Reprocess"] }
+    ],
+    after: () => render()
+  });
+  const rcAct = ERP.actions({
+    list:"recipes", title:"Recipe",
+    fields:[
+      { name:"shade", label:"Shade", type:"text", required:true },
+      { name:"rev", label:"Revision", type:"number", required:true },
+      { name:"temp", label:"Temperature (°C)", type:"number", required:true },
+      { name:"mins", label:"Time (minutes)", type:"number", required:true }
+    ],
+    canDelete: r => db.dyeBatches.some(b => b.recipe === r.id) ? "Batches have been run on this recipe." : null,
+    after: () => render()
+  });
+
+  function render(){
+    const done = db.dyeBatches.filter(b => b.status === "Completed");
+    const avgLoss = done.length ? done.reduce((s,b) => s + b.loss, 0) / done.length : 0;
+    const water = db.dyeBatches.reduce((s,b) => s + b.water, 0);
+    const kg = db.dyeBatches.reduce((s,b) => s + b.kg, 0);
+
+    page.innerHTML = `
+      <div class="page-head"><div class="ph-txt"><h2>Dyeing batches</h2>
+        <p>Every batch keeps its recipe revision, so a repeat shade is a repeat, not a guess.</p></div>
+        <button class="btn btn-primary" id="new">New batch</button></div>
+      ${ERP.kpis([
+        { label:"Batches", value: db.dyeBatches.length, note: db.dyeBatches.filter(b => b.status === "Running").length + " running" },
+        { label:"Fabric dyed", value: ERP.num(kg) + " kg" },
+        { label:"Average loss", value: ERP.dec(avgLoss) + "%", tone: avgLoss > 4 ? "rose" : "teal" },
+        { label:"Water per kg", value: kg ? ERP.dec(water/kg) + " L" : "—", note:"Total " + ERP.num(water) + " L", tone:"sky" }
+      ])}
+      <div class="tabs">
+        <button class="tab ${tab==="batches"?"is-on":""}" data-tab="batches">Batches</button>
+        <button class="tab ${tab==="recipes"?"is-on":""}" data-tab="recipes">Recipes</button>
+      </div>
+      <div id="body"></div>`;
+
+    const body = page.querySelector("#body");
+    if(tab === "batches"){
+      body.innerHTML = `<div class="card">` + ERP.table([
+        { h:"Batch", key:"id", cls:"mono strong" },
+        { h:"Date", render:b => ERP.date(b.date) },
+        { h:"Fabric", render:b => ERP.esc(ERP.nameOf(db.fabrics,b.fabric)) },
+        { h:"Shade", key:"shade" },
+        { h:"Recipe", key:"recipe", cls:"mono" },
+        { h:"Kg", cls:"num", render:b => ERP.num(b.kg) },
+        { h:"Machine", render:b => ERP.esc(ERP.nameOf(db.machines,b.machine)) },
+        { h:"Cycle", cls:"num", render:b => b.temp + "°C / " + b.mins + "m" },
+        { h:"Loss", cls:"num", render:b => b.loss ? ERP.dec(b.loss) + "%" : "—" },
+        { h:"Status", render:b => ERP.statusBadge(b.status) },
+        { h:"", cls:"num", render:b => b.status === "Running" ? `<span class="row-act"><button class="btn btn-sm" data-close="${b.id}">Close</button></span>` : "" },
+        dbAct.col
+      ], db.dyeBatches) + `</div>`;
+      dbAct.wire(body);
+      body.querySelectorAll("[data-close]").forEach(btn =>
+        btn.onclick = () => closeBatch(ERP.by(db.dyeBatches, btn.dataset.close)));
+    }
+    if(tab === "recipes"){
+      body.innerHTML = `<div class="grid g-3">` + db.recipes.map(r => `
+        <div class="card"><div class="card-head"><h3>${ERP.esc(r.shade)}</h3>
+          <span class="right badge">rev ${r.rev}</span></div>
+          <div class="card-body">
+            <p class="mono" style="color:var(--muted)">${r.id} · ${r.temp}°C · ${r.mins} min</p>
+            ${ERP.table([{ h:"Chemical", render:i => ERP.esc(i.n) }, { h:"Dose", cls:"num", render:i => i.q }], r.items)}
+            <p style="margin-top:10px;font-size:.82rem;color:var(--muted)">
+              Used on ${db.dyeBatches.filter(b => b.recipe === r.id).length} batches.</p>
+            <div class="btn-row" style="margin-top:10px">
+              <button class="btn btn-sm" data-edit="${r.id}">Edit</button>
+              <button class="btn btn-sm btn-danger" data-del="${r.id}">Delete</button></div>
+          </div></div>`).join("") + `</div>`;
+    }
+
+    if(tab === "recipes") rcAct.wire(body);
+    page.querySelector("#new").onclick = batchModal;
+    page.querySelectorAll(".tab").forEach(b => b.onclick = () => { tab = b.dataset.tab; render(); });
+  }
+  render();
+})();
+</script>
+</body></html>

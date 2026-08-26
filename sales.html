@@ -1,0 +1,193 @@
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sales orders · LoomLine Textile ERP</title>
+<meta name="theme-color" content="#141733">
+<script>try{document.documentElement.setAttribute("data-theme",localStorage.getItem("loomline.theme")||"light")}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Sora:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="erp-styles.css">
+</head><body>
+<script src="erp-data.js"></script><script src="erp-core.js"></script>
+
+<script>
+(function(){
+  const db = ERP.db;
+  const page = ERP.shell({ title:"Sales orders", crumb:"Sell", page:"sales.html", module:"sales" });
+  if(!page) return;
+  let tab = "orders", q = ERP.param("q") || "";
+
+  const custOpts = db.customers.map(c => ({ value:c.id, label:c.name }));
+  const fabOpts  = db.fabrics.map(f => ({ value:f.id, label:f.name + " · " + f.gsm + " GSM · " + f.width + '"' }));
+
+  const custFields = [
+    { name:"name", label:"Company name", type:"text", required:true, full:true },
+    { name:"city", label:"City", type:"text", required:true },
+    { name:"state", label:"State", type:"text", value:"Tamil Nadu" },
+    { name:"stateCode", label:"State code", type:"text", value:"33", hint:"Drives CGST+SGST versus IGST" },
+    { name:"gstin", label:"GSTIN", type:"text" },
+    { name:"contact", label:"Contact person", type:"text" },
+    { name:"phone", label:"Phone", type:"tel" },
+    { name:"terms", label:"Payment terms", type:"select", options:["On invoice","15 days","30 days","45 days","60 days"] },
+    { name:"credit", label:"Credit limit (₹)", type:"number" }
+  ];
+  const custCrud = ERP.crud({
+    list:"customers", prefix:"C-", width:3, title:"Customer", fields:custFields, extra:{ outstanding:0 },
+    canDelete:c => db.salesOrders.some(o => o.customer === c.id) ? "Sales orders exist for this customer." : null,
+    cols:[
+      { h:"Customer", render:c => `<span class="people"><span class="avatar-lg">${ERP.initials(c.name)}</span>
+          <span><b>${ERP.esc(c.name)}</b><span>${ERP.esc(c.city)}</span></span></span>` },
+      { h:"Code", key:"id", cls:"mono" },
+      { h:"GSTIN", key:"gstin", cls:"mono" },
+      { h:"Contact", render:c => ERP.esc(c.contact || "—") + " · " + ERP.esc(c.phone || "") },
+      { h:"Terms", key:"terms" },
+      { h:"Credit limit", cls:"num", render:c => ERP.crore(c.credit) },
+      { h:"Outstanding", cls:"num", render:c => c.outstanding ? ERP.crore(c.outstanding) : "—" }
+    ],
+    after: () => render()
+  });
+
+  const orderFields = [
+    { name:"customer", label:"Customer", type:"select", options:custOpts, required:true },
+    { name:"fabric",   label:"Fabric",   type:"select", options:fabOpts, required:true },
+    { name:"qty",      label:"Quantity (m)", type:"number", required:true, min:1 },
+    { name:"rate",     label:"Rate per metre (₹)", type:"number", required:true, step:"0.01" },
+    { name:"due",      label:"Delivery date", type:"date", value:"2026-10-05", required:true },
+    { name:"status",   label:"Status", type:"select", options:["Draft","Confirmed","In production"] },
+    { name:"notes",    label:"Instructions to production", type:"textarea", full:true }
+  ];
+
+  function newOrder(){
+    ERP.modal({
+      title:"New sales order", wide:true, okText:"Save order", cancelText:"Cancel",
+      body: ERP.form(orderFields),
+      onOk(scope){
+        const v = ERP.readForm(scope, orderFields);
+        if(!v) return false;
+        const id = ERP.nextId(db.salesOrders, "SO-", 4);
+        db.salesOrders.unshift({ id, date: ERP.today(), customer:v.customer, fabric:v.fabric,
+          qty:Number(v.qty), rate:Number(v.rate), due:v.due, produced:0, passed:0, packed:0,
+          dispatched:0, status:v.status || "Draft", notes:v.notes });
+        ERP.save(); ERP.toast("Saved " + id + ". Plan it from the Production page."); render();
+      }
+    });
+  }
+
+  function editOrder(o){
+    ERP.modal({
+      title:"Edit " + o.id, wide:true, okText:"Save changes",
+      body: ERP.form(orderFields, o),
+      onOk(scope){
+        const v = ERP.readForm(scope, orderFields);
+        if(!v) return false;
+        if(Number(v.qty) < o.dispatched){
+          ERP.toast("Order quantity cannot go below the " + ERP.num(o.dispatched) + " m already dispatched.", true);
+          return false;
+        }
+        Object.assign(o, v, { qty:Number(v.qty), rate:Number(v.rate) });
+        ERP.save(); ERP.toast(o.id + " updated."); render();
+      }
+    });
+  }
+  function delOrder(o){
+    if(o.produced > 0){ ERP.toast("Fabric has already been woven against " + o.id + ". Cancel it instead of deleting.", true); return; }
+    ERP.confirm({
+      title:"Delete " + o.id + "?",
+      body:"Nothing has been produced against this order, so it can be removed cleanly.",
+      okText:"Delete order",
+      onOk(){
+        db.salesOrders.splice(db.salesOrders.indexOf(o), 1);
+        ERP.save(); ERP.toast(o.id + " deleted."); render();
+      }
+    });
+  }
+
+  function openOrder(o){
+    const c = ERP.by(db.customers, o.customer), f = ERP.by(db.fabrics, o.fabric);
+    const rows = [["Ordered",o.qty],["Produced",o.produced],["Quality passed",o.passed],["Packed",o.packed],["Dispatched",o.dispatched],["Balance",o.qty-o.dispatched]];
+    const po = db.prodOrders.find(p => p.so === o.id);
+    ERP.modal({
+      title:"Sales order " + o.id, wide:true, cancelText:"Close",
+      body:`
+        <dl class="def" style="margin:0 0 16px">
+          <div><dt>Customer</dt><dd>${ERP.esc(c.name)}, ${ERP.esc(c.city)}</dd></div>
+          <div><dt>Fabric</dt><dd>${ERP.esc(f.name)}</dd></div>
+          <div><dt>Construction</dt><dd>${f.warp} × ${f.weft} · ${f.gsm} GSM · ${f.width}"</dd></div>
+          <div><dt>Rate</dt><dd>${ERP.money(o.rate)} / m</dd></div>
+          <div><dt>Order value</dt><dd>${ERP.crore(o.qty * o.rate)}</dd></div>
+          <div><dt>Due</dt><dd>${ERP.date(o.due)}</dd></div>
+          <div><dt>Payment terms</dt><dd>${ERP.esc(c.terms)}</dd></div>
+          <div><dt>Status</dt><dd>${ERP.statusBadge(o.status)}</dd></div>
+        </dl>
+        <h4 style="margin-bottom:8px">Where the quantity stands</h4>
+        ${ERP.table([
+          { h:"Stage", render:r => r[0] },
+          { h:"Metres", cls:"num", render:r => ERP.num(r[1]) },
+          { h:"Of order", render:r => ERP.bar((r[1]/o.qty)*100) }
+        ], rows)}
+        <p style="margin-top:14px">${ po
+          ? `Production order <a class="mono" href="production.html?q=${po.id}">${po.id}</a> is ${po.status.toLowerCase()} on ${ERP.esc(po.machines.join(", "))}.`
+          : `No production order yet. Open the Production page to plan this order.`}</p>`
+    });
+  }
+
+  function render(){
+    const search = q.toUpperCase();
+    const orders = db.salesOrders.filter(o => !search ||
+      o.id.toUpperCase().includes(search) || ERP.nameOf(db.customers,o.customer).toUpperCase().includes(search));
+    const value = orders.reduce((s,o) => s + o.qty*o.rate, 0);
+    const pending = orders.reduce((s,o) => s + (o.qty-o.dispatched)*o.rate, 0);
+
+    page.innerHTML = `
+      <div class="page-head">
+        <div class="ph-txt"><h2>Order book</h2>
+          <p>${orders.length} orders · ${ERP.crore(value)} booked · ${ERP.crore(pending)} still to deliver</p></div>
+        <a class="btn" href="quotations.html">Quotations</a>
+        <button class="btn" id="newCust">Add customer</button>
+        <button class="btn btn-primary" id="new">New sales order</button>
+      </div>
+      <div class="tabs">
+        <button class="tab ${tab==="orders"?"is-on":""}" data-tab="orders">Sales orders</button>
+        <button class="tab ${tab==="cust"?"is-on":""}" data-tab="cust">Customers</button>
+      </div>
+      <div class="filters"><input id="q" type="search" placeholder="Search order or customer" value="${ERP.esc(q)}"></div>
+      <div class="card" id="body"></div>`;
+
+    const body = page.querySelector("#body");
+    if(tab === "orders"){
+      body.innerHTML = ERP.table([
+        { h:"Order", key:"id", cls:"mono strong" },
+        { h:"Date", render:o => ERP.date(o.date) },
+        { h:"Customer", render:o => ERP.esc(ERP.nameOf(db.customers,o.customer)) },
+        { h:"Fabric", render:o => ERP.esc(ERP.nameOf(db.fabrics,o.fabric)) },
+        { h:"Metres", cls:"num", render:o => ERP.num(o.qty) },
+        { h:"Rate", cls:"num", render:o => ERP.money(o.rate) },
+        { h:"Value", cls:"num", render:o => ERP.crore(o.qty*o.rate) },
+        { h:"Delivered", render:o => ERP.bar((o.dispatched/o.qty)*100, o.dispatched>=o.qty?"ok":"") },
+        { h:"Due", render:o => ERP.date(o.due) },
+        { h:"Status", render:o => ERP.statusBadge(o.status) },
+        { h:"", cls:"num", render:o => `<span class="row-act">
+            <button class="btn btn-sm" data-edit="${o.id}">Edit</button>
+            <button class="btn btn-sm btn-danger" data-del="${o.id}">Delete</button></span>` }
+      ], orders, { onRow:true, rowAttr:o => `data-id="${o.id}"`,
+        emptyTitle:"No orders match", emptyText:"Clear the search or raise a new order." });
+      body.querySelectorAll("tbody tr").forEach(tr =>
+        tr.onclick = () => openOrder(ERP.by(db.salesOrders, tr.dataset.id)));
+      body.querySelectorAll("[data-edit]").forEach(b => b.onclick = e => { e.stopPropagation(); editOrder(ERP.by(db.salesOrders, b.dataset.edit)); });
+      body.querySelectorAll("[data-del]").forEach(b => b.onclick = e => { e.stopPropagation(); delOrder(ERP.by(db.salesOrders, b.dataset.del)); });
+    }
+    if(tab === "cust"){
+      body.innerHTML = custCrud.html();
+      custCrud.wire(body);
+    }
+
+    page.querySelector("#new").onclick = newOrder;
+    page.querySelector("#newCust").onclick = () => custCrud.editor();
+    page.querySelectorAll(".tab").forEach(b => b.onclick = () => { tab = b.dataset.tab; render(); });
+    const qi = page.querySelector("#q");
+    qi.oninput = () => { q = qi.value; const p = qi.selectionStart; render();
+      const n = page.querySelector("#q"); n.focus(); n.setSelectionRange(p,p); };
+  }
+  render();
+})();
+</script>
+</body></html>

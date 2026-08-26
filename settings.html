@@ -1,0 +1,143 @@
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Settings · LoomLine Textile ERP</title>
+<meta name="theme-color" content="#141733">
+<script>try{document.documentElement.setAttribute("data-theme",localStorage.getItem("loomline.theme")||"light")}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Sora:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="erp-styles.css">
+</head><body>
+<script src="erp-data.js"></script><script src="erp-core.js"></script>
+
+<script>
+(function(){
+  const db = ERP.db;
+  const page = ERP.shell({ title:"Settings", crumb:"Manage", page:"settings.html", module:"settings" });
+  if(!page) return;
+  let tab = "company";
+
+  const coFields = [
+    { name:"name", label:"Company name", type:"text", value:db.company.name, required:true, full:true },
+    { name:"unit", label:"Unit type", type:"select", value:db.company.unit,
+      options:["Spinning","Weaving","Weaving + Processing","Dyeing & processing","Printing","Garment","Trading"] },
+    { name:"gstin", label:"GSTIN", type:"text", value:db.company.gstin },
+    { name:"phone", label:"Phone", type:"tel", value:db.company.phone },
+    { name:"email", label:"Email", type:"email", value:db.company.email },
+    { name:"fyStart", label:"Financial year starts", type:"date", value:db.company.fyStart },
+    { name:"state", label:"State", type:"text", value:db.company.state, hint:"Decides CGST+SGST versus IGST on every invoice" },
+    { name:"stateCode", label:"State code", type:"text", value:db.company.stateCode },
+    { name:"address", label:"Address", type:"textarea", value:db.company.address, full:true },
+    { name:"bankName", label:"Bank", type:"text", value:db.company.bank.name },
+    { name:"bankAc", label:"Account number", type:"text", value:db.company.bank.ac },
+    { name:"bankIfsc", label:"IFSC", type:"text", value:db.company.bank.ifsc },
+    { name:"terms", label:"Terms printed on quotations and invoices", type:"textarea", value:db.company.terms, full:true, rows:4 }
+  ];
+
+  function render(){
+    page.innerHTML = `
+      <div class="page-head"><div class="ph-txt"><h2>Settings</h2>
+        <p>Company details, the modules this unit has licensed, and the demo data. Users and permissions live on their own screen.</p></div>
+        <a class="btn" href="users.html">Users & permissions</a></div>
+      <div class="tabs">
+        <button class="tab ${tab==="company"?"is-on":""}" data-tab="company">Company</button>
+        <button class="tab ${tab==="modules"?"is-on":""}" data-tab="modules">Modules</button>
+        <button class="tab ${tab==="data"?"is-on":""}" data-tab="data">Data</button>
+      </div>
+      <div id="body"></div>`;
+
+    const body = page.querySelector("#body");
+
+    if(tab === "company"){
+      body.innerHTML = `<div class="card"><div class="card-head"><h3>Company</h3></div>
+        <div class="card-body">${ERP.form(coFields)}
+          <div style="margin-top:16px"><button class="btn btn-primary" id="save">Save changes</button></div>
+          <h4 style="margin:24px 0 8px">Branches</h4>
+          <ul>${db.company.branches.map(b => `<li>${ERP.esc(b)}</li>`).join("")}</ul>
+        </div></div>`;
+      body.querySelector("#save").onclick = () => {
+        const v = ERP.readForm(body, coFields);
+        if(!v) return;
+        db.company.bank = { name:v.bankName, ac:v.bankAc, ifsc:v.bankIfsc };
+        delete v.bankName; delete v.bankAc; delete v.bankIfsc;
+        Object.assign(db.company, v);
+        ERP.save(); ERP.toast("Company details saved. They appear on the next document you print.");
+      };
+    }
+
+
+    if(tab === "modules"){
+      body.innerHTML = `<div class="card"><div class="card-head"><h3>Screens in this installation</h3>
+        <span class="card-sub">licence a module off and it disappears for everyone</span></div>
+        <div class="card-body"><div class="grid g-3">
+        ${db.modulesList.map(m => {
+          const lic = db.modules.find(x => x.key === m.key);
+          const on = lic ? lic.on : true;
+          const roles = db.roles.filter(r => r.perms.indexOf(m.key) !== -1).length;
+          return `<label class="switch">
+            <input type="checkbox" data-m="${m.key}" ${on ? "checked" : ""} ${m.key === "settings" ? "disabled" : ""}>
+            <span><b>${ERP.esc(m.name)}</b>
+            <span>${ERP.esc(m.group)} · open to ${roles} of ${db.roles.length} roles</span></span></label>`;
+        }).join("")}
+        </div>
+        <div class="note violet" style="margin-top:16px">Licensing decides what the company has bought.
+          Permissions decide who inside the company may open it —
+          set those on <a href="users.html">Users &amp; permissions</a>.</div>
+        </div></div>`;
+      body.querySelectorAll("[data-m]").forEach(cb => cb.onchange = () => {
+        let lic = db.modules.find(x => x.key === cb.dataset.m);
+        if(!lic){ lic = { key:cb.dataset.m, name:cb.dataset.m, on:true }; db.modules.push(lic); }
+        lic.on = cb.checked;
+        if(!cb.checked){
+          db.roles.forEach(r => { const i = r.perms.indexOf(lic.key); if(i > -1 && r.id !== "R-01") r.perms.splice(i,1); });
+        }
+        ERP.save();
+        ERP.toast(ERP.nameOf(db.modulesList.map(m => ({ id:m.key, name:m.name })), lic.key) +
+          (lic.on ? " licensed." : " switched off for every role."));
+        render();
+      });
+    }
+    if(tab === "data"){
+      const counts = [
+        ["Customers", db.customers.length], ["Suppliers", db.suppliers.length],
+        ["Fabrics", db.fabrics.length], ["Yarn lots", db.yarn.length],
+        ["Machines", db.machines.length], ["Sales orders", db.salesOrders.length],
+        ["Production orders", db.prodOrders.length], ["Rolls", db.rolls.length],
+        ["Inspections", db.inspections.length], ["Dye batches", db.dyeBatches.length],
+        ["Job work challans", db.jobWorks.length], ["Invoices", db.invoices.length],
+        ["Print jobs", db.printJobs.length], ["Garment styles", db.styles.length],
+        ["Maintenance jobs", db.maintenance.length], ["Expense vouchers", db.expenses.length],
+        ["Users", db.users.length], ["Roles", db.roles.length],
+        ["Quotations", db.quotations.length]
+      ];
+      body.innerHTML = `<div class="card"><div class="card-head"><h3>What is in the system</h3></div>
+        <div class="card-body"><dl class="def">${counts.map(c =>
+          `<div><dt>${ERP.esc(c[0])}</dt><dd>${c[1]}</dd></div>`).join("")}</dl>
+          <div style="margin-top:18px;display:flex;gap:10px;flex-wrap:wrap">
+            <button class="btn" id="export">Download a backup</button>
+            <button class="btn btn-primary" id="reset">Reset demo data</button>
+          </div>
+          <div class="note" style="margin-top:16px">Records live in this browser only. Clearing site data,
+            or opening the ERP on another device, starts again from the file <span class="mono">erp-data.js</span>.
+            A live installation stores the same records in PostgreSQL behind a login.</div>
+        </div></div>`;
+      body.querySelector("#export").onclick = () => {
+        const blob = new Blob([JSON.stringify(db, null, 2)], { type:"application/json" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = "loomline-backup-" + ERP.today() + ".json";
+        a.click(); URL.revokeObjectURL(a.href);
+        ERP.toast("Backup downloaded.");
+      };
+      body.querySelector("#reset").onclick = () => {
+        ERP.modal({ title:"Reset demo data", okText:"Reset everything", cancelText:"Keep my data",
+          body:"<p>Every order, roll, inspection and payment you entered will go, and the ERP will start again from the data it shipped with.</p>",
+          onOk(){ ERP.reset(); ERP.toast("Demo data restored."); setTimeout(() => location.reload(), 600); } });
+      };
+    }
+
+    page.querySelectorAll(".tab").forEach(b => b.onclick = () => { tab = b.dataset.tab; render(); });
+  }
+  render();
+})();
+</script>
+</body></html>
